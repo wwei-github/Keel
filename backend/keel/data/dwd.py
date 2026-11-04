@@ -10,6 +10,10 @@
 - 样本不足时退回固定阈值 ``HARD_JUMP``。小样本的稳健估计没有意义，
   而这时候如果继续用 NaN 阈值，结果是**一根异常都标不出来**——
   「没报警」会被读成「没问题」，这比漏报更危险。
+
+两段判定都必须**按 (symbol, interval) 分组**执行。收益率的定义域是单个标的的
+时间序列，把不同标的的行按 open_time 混在一起再 diff()，得到的是跨标的价差
+变化率，不是收益。
 """
 
 from __future__ import annotations
@@ -30,13 +34,21 @@ def to_dwd(ods: pd.DataFrame) -> pd.DataFrame:
     frame = ods.sort_values(["ingested_at", "revision"]).drop_duplicates(
         ["symbol", "interval", "open_time"], keep="last"
     )
-    frame = frame.sort_values("open_time").reset_index(drop=True)
+    frame = frame.sort_values(["symbol", "interval", "open_time"]).reset_index(drop=True)
 
-    ret = np.log(frame["close"].astype("float64")).diff()
-    # shift(1)：参考分布只能用「这根之前」的收益，否则异常 bar 会把自己算进基线
-    history = ret.abs().shift(1)
-    scale = history.expanding(min_periods=1).median() * 1.4826
-    observed = history.expanding(min_periods=1).count()
-    threshold = np.where(observed >= MIN_OBS_FOR_MAD, OUTLIER_Z * scale, HARD_JUMP)
-    frame["is_outlier"] = (ret.abs() > threshold).fillna(False).to_numpy(dtype=bool)
+    # 异常判定必须**按 (symbol, interval) 分组**做。整表按 open_time 排序后直接
+    # diff()，收益的第一根会跨标的（ETH 的首根减 BTC 的末根，得到一个 20 倍的
+    # "收益"），随后 MAD 基线被这个假值抬高，两个标的的真实异常都被吃掉。
+    # 症状是 is_outlier 全 False——「没报警」读起来像「没问题」。
+    parts: list[pd.Series] = []
+    for _, chunk in frame.groupby(["symbol", "interval"], sort=False):
+        ret = np.log(chunk["close"].astype("float64")).diff()
+        # shift(1)：参考分布只能用「这根之前」的收益，否则异常 bar 会把自己算进基线
+        history = ret.abs().shift(1)
+        scale = history.expanding(min_periods=1).median() * 1.4826
+        observed = history.expanding(min_periods=1).count()
+        threshold = np.where(observed >= MIN_OBS_FOR_MAD, OUTLIER_Z * scale, HARD_JUMP)
+        flags = (ret.abs() > threshold).fillna(False)
+        parts.append(pd.Series(flags.to_numpy(dtype=bool), index=chunk.index))
+    frame["is_outlier"] = pd.concat(parts).sort_index()
     return frame

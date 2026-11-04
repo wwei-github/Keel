@@ -32,7 +32,7 @@ backend/           Python 服务（API、ETL、回测、调度、实盘运行时
     db/            PostgreSQL 模式与迁移、DuckDB 集市
     ops/           告警、心跳
     workers/       常驻进程入口（各容器的 main）
-  tests/           154 个测试（契约 40 + 领域、API 与验收 114）
+  tests/           174 个测试（契约 40 + 领域、API、调度与验收 134）
 web/               Vite + React + TypeScript 前端
 deploy/            docker-compose 与镜像定义
 docs/              架构设计文档与实施计划
@@ -75,6 +75,31 @@ make web        # :5173  → 行情 / 回测 / 报告
 
 改数据后记得重跑 `make etl`：集市是可重建的派生物，不是真相。
 
+## 整套跑在 Docker 里
+
+不想装 Python/Node 时用这条路径。`make up` 会起 postgres、migrate（一次性建表）、
+api、etl-worker、backtest-worker、scheduler、web 七个容器。
+
+```bash
+make env            # 从 .env.example 生成 .env（若不存在）
+make up             # DOCKER_BUILDKIT=0 docker compose up -d --build
+make logs
+
+# 一次性数据准备（也可交给 scheduler 在 UTC 00:00 自己跑）
+docker compose --env-file .env -f deploy/docker-compose.yml exec api \
+  python -c "from keel.market.instruments import sync_instruments; print(sync_instruments())"
+docker compose --env-file .env -f deploy/docker-compose.yml exec api \
+  python -c "from keel.tools.backfill import run_for_enabled_instruments as r; print(len(r(lookback_days=45)))"
+```
+
+起好后：Web `http://127.0.0.1:15173`（nginx 反代 `/api/`），API 直连 `http://127.0.0.1:18000`。
+**端口用 `.env` 里的 `KEEL_HOST_*_PORT` 覆盖**，因为 `${VAR}` 插值只读 compose 文件所在目录
+的 `.env` 或 `--env-file`，`env_file:` 只影响容器内环境变量、不影响端口映射。
+
+macOS 上 `docker build` 必须带 `DOCKER_BUILDKIT=0`：buildx 会去写
+`~/.docker/buildx/activity/`，权限不足时报 `operation not permitted`，
+报错看起来像 daemon 挂了，实际不是。`make` 里已默认 `BUILDKIT=0`。
+
 ## 当前能跑什么
 
 - **主数据**：`sync_instruments` 从 Binance 拉现货 USDT 对（实测 518 个），下线改 `HALT` 不删行。
@@ -86,7 +111,7 @@ make web        # :5173  → 行情 / 回测 / 报告
   `t+1` 开盘成交、手续费与滑点计入，指标含夏普/回撤/换手/胜率。
 - **报告**：JSON 制品，带 `disclaimer`，`content_url` 不暴露服务器路径。
 - **API**：API-01/02/03/04/05/10/11/12 已实现；API-09/15 保持 501（执行网关在 V2）。
-- **测试**：带 PG 时 153 passed / 1 skipped；不带 PG 时 125 passed / 29 skipped（跳过的是必须真库的队列、事件与集成测试）。
+- **测试**：带 PG 时 173 passed / 1 skipped；不带 PG 时 143 passed / 31 skipped（跳过的是必须真库的队列、事件与集成测试）。
 
 ## 几个不该被"优化"掉的设计
 
@@ -98,6 +123,11 @@ make web        # :5173  → 行情 / 回测 / 报告
 - **集市可重建，原始湖不可改。** `ods_`/`dwd_`/`dws_` 都能从上游重算。
 - **总开关只停新开仓，不停平仓与撤单。** 目的是"别再买"，不是"别管了"。
 - **DuckDB 单写者。** 回填进程不写集市，覆盖率由 ETL 派生——两个写者必然互相覆盖。
+- **定时任务的触发器由 cron 表达式构造，不用字符串 `"cron"`。**
+  后者会建出全通配的 cron（每分钟跑一次），日志看起来完全正常。
+- **原始湖只追加，重复行在读取时收敛。** 同根 bar 多份是设计内状态（revision 历史），
+  不是脏数据；去重放读取侧，磁盘上留全部版本。
+- **nginx 反代用变量形式的上游。** 写死主机名只解析一次，api 容器重建后 web 会一直 502。
 - **特征按 (symbol, interval) 分组计算。** 整表一次算会让 `open_time` 索引撞车，
   并让滚动窗口跨标的续算——BTC 的尾部窗口会参与 ETH 的 SMA，两个标的的特征都错。
 

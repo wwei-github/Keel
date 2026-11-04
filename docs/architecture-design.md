@@ -5,7 +5,7 @@
 > 系统阶段：全新系统（Greenfield），无既有代码与既有数据
 > 使用者：本人（开发、研究、交易与运维均由一人承担）
 > 上游输入：口头需求（九组件链路），无 PRD
-> 版本：2026-11-05 / v0.9
+> 版本：2026-11-05 / v0.10
 > 当前交付目标：V1 研究回测版（历史数据、回测、报告与查看），交易执行从 V2 开始
 
 ---
@@ -1637,7 +1637,7 @@ flowchart TB
 ```
 backend/                    Python 服务
   keel/                     主包（68 个模块，约 4000 行）
-  tests/                    154 个测试（契约 40 + 领域、API 与验收 114）
+  tests/                    174 个测试（契约 40 + 领域、API、调度与验收 134）
   pyproject.toml, uv.lock
 web/                        Vite + React + TypeScript
   src/api/                  HTTP 客户端（Envelope 解包、错误规格化）
@@ -1689,7 +1689,7 @@ docs/                       本文档
 
 - **数据库 DDL 在真实 PostgreSQL 16 上执行过**，`migrate()` 可重复执行。
 - **回填→ETL→回测→报告→API 全链路跑通**：真实 Binance `BTC/USDT` 1h，2024-01-01 至 2024-01-15 共 337 根，回测 SUCCEEDED，报告制品带 disclaimer，四个接口全部 200。
-- **测试**：带 PG 时 153 passed / 1 skipped；不带 PG 时 125 passed / 29 skipped（跳过的是必须真库的队列、事件与集成测试）。
+- **测试**：带 PG 时 173 passed / 1 skipped；不带 PG 时 143 passed / 31 skipped（跳过的是必须真库的队列、事件与集成测试）。
 - **前端接真实数据**：`tsc --noEmit` 与 `npm run build` 通过，四个页面经 Vite 代理取到真实响应。
 - **两个镜像构建成功并跑起来过**：`DOCKER_BUILDKIT=0 docker build` 分别产出 `keel-backend:test` 与 `keel-web:test`；`docker run --rm keel-backend:test python -c "import keel, fastapi, duckdb, psycopg"` 打印 `keel 0.1.0`，`keel-web:test` 里 `/usr/share/nginx/html` 有 `index.html` 与 `assets/`。注意必须加 `DOCKER_BUILDKIT=0`：buildx 会报 `failed to update builder last activity time ... operation not permitted`，那是 buildx 的 activity 目录权限问题，不是镜像定义的问题。
 - **整套 Compose 在本机跑起来了**（v0.9）：`DOCKER_BUILDKIT=0 docker compose up -d` 起六个服务，
@@ -1744,7 +1744,8 @@ docs/                       本文档
 | v0.6 | 2026-11-05 | **契约落地为代码**。新增 `keel/contracts.py`（Strategy Protocol、Signal、BarView、PositionView、CostModel、`slice_window`、`check_window_fits`、`run_decide` 输出校验）、`keel/features.py`（`sma`/`donchian`/`atr`/`roc` 原语与 `compute` 固定特征集）、`keel/strategies.py`（双均线交叉、唐奇安突破）、`tests/test_contract.py`（40 个测试，含 hypothesis 属性测试）、`pyproject.toml` + `uv.lock`（Q7）。**契约由六项扩为七项**：新增修订 ⑥ `required_lookback(params)`（堵住「参数超出窗口导致静默无信号」）、修订 ⑦ `decide` 增加 `bar: BarView`（窗口与决策点分离，突破策略才拿得到当前收盘价）。§3.7 补「变异测试」小节，记录三次注入破坏各失败多少测试。A9 判定更新为七项并标注已完成；Q7、Q8 移入「已关闭的阻塞项」；新增 ADR-006（契约从文档评审改为代码验证）、ADR-007（`lookback` 与 `required_lookback` 的分工） |
 | v0.7 | 2026-11-05 | **工程骨架落地**（新增 §13）。仓库改为单仓双目录（`backend/` + `web/`），新增 `backend/keel` 下 15 个子包骨架（api/data/market/research/execution/risk/runtime/portfolio/reports/scheduler/events/db/ops/workers）、`web`（Vite + React + TS + lightweight-charts）、`deploy`（docker-compose + Dockerfile + nginx）、`.github/workflows/ci.yml`、`Makefile`、`README.md` 重写。新增 `keel/config.py`（frozen Settings）、`errors.py`（`ErrorCode` 稳定枚举）、`logging.py`（JSON 行日志）、`api/`（Envelope + `meta.stale` + 统一错误处理 + 五个 router）、`db/schema.sql`（八张表 DDL）、`workers/`（三个常驻进程入口）。开发依赖改用 PEP 735 `dependency-groups`。全文新增 §13 记录「文档章节 → 代码包」映射与骨架阶段刻意做的六件事、未验证的四件事 |
 | v0.8 | 2026-11-05 | **V1（研究回测）实现完成**。21 个任务的实施计划落盘于 `docs/superpowers/plans/2026-11-04-v1-research-backtest.md`。新增实现：`db/pool.py`（`ConnectionPool` + `dict_row`）、`db/mart.py`（flock 单写者 + 临时文件原子发布）、`data/{schemas,lake,coverage,dwd,etl}.py`、`market/{normalize,exchange,backfill}.py`、`research/{registry,simulator,metrics,runner,backtest,engine}.py`、`reports/{quantstats,artifacts}.py`、`events/bus.py`（PG 表 + `LISTEN/NOTIFY`）、`ops/{alerts,heartbeat}.py`、`scheduler/jobs.py`、`workers/{etl,backtest,scheduler}_worker.py`、`tools/{acceptance,backfill,exchange_factory}.py`、`api/{downsample,routers/*}.py`。**范围与口径修订**：`ops_coverage` 改为 ETL 派生表（ADR-008）；V1 执行器改为自建 `keel-bar`，Freqtrade 适配推 V1.5（ADR-009）；A3 随之收窄为「`dws_features` 与 `keel-bar` 决策时现算的特征逐值一致」。**验收**：137 个测试（带 PG 136 passed / 1 skipped，无 PG 时 113 passed / 24 skipped）。**真实数据端到端跑通**：Binance 回填 337 行 → ETL 建三张集市表 → 回测 SUCCEEDED → 报告制品带 disclaimer → API 四项 200 → Web 四页接真数据。附录 B 新增「v0.8 未做的事」 |
-| v0.9 | 2026-11-05 | **V1 收口与三处修补**。新增 `market/instruments.py`（`sync_instruments` / `from_markets` / `_decimals`）与调度任务 `sync-instruments`（ADR-010）——v0.8 之前 `instruments` 表没有任何写入路径，所有回补任务静默空转。修 ETL 特征混算（整表一次算导致 `open_time` 索引撞车、滚动窗口跨标的续算）改为按 `(symbol, interval)` 分组，`dws_features` 从 674 行/337 个 distinct `open_time` 变为两标的分组结果。验收脚本补 `check_a3`（`A3_REL_TOL = 1e-9`）与 `check_a2_live`，重写 `check_a7`（原 `grep` 会命中自己，永远失败），`main()` 现跑 A1/A2/A3/A7。`Makefile` 加 `migrate`/`instruments` 并让 `backfill` 依赖 `instruments`；`.env.example` 补 `KEEL_EXCHANGE_MARKET_TYPE`。**测试 154 个**（带 PG 153 passed / 1 skipped，无 PG 125 passed / 29 skipped）。文档修正 v0.8「多标的未验证」的错误表述（`runner.py` 本就是逐标的等权组合）、新增「验收项的可执行性」表（A1/A2/A3/A7/A9 可自动判定，A4 需人工接线，A5/A6/A8/A10 靠人）、新增 ADR-010。**整体 Compose 首次跑通**：新增一次性 `migrate` 服务并挡在所有 worker 之前（`service_completed_successfully`），此前 worker 会以 `UndefinedTable: relation "backtest_runs" does not exist` 无限重启；`Makefile` 加 `env`/`BUILDKIT` 变量。实测：518 个 USDT 现货对写入、325 个标的各回填 24–25 根、两标回测 SUCCEEDED、nginx 反代 `/api/` 返回同样 Envelope。 |
+| v0.9 | 2026-11-05 | **V1 收口与三处修补**。新增 `market/instruments.py`（`sync_instruments` / `from_markets` / `_decimals`）与调度任务 `sync-instruments`（ADR-010）——v0.8 之前 `instruments` 表没有任何写入路径，所有回补任务静默空转。修 ETL 特征混算（整表一次算导致 `open_time` 索引撞车、滚动窗口跨标的续算）改为按 `(symbol, interval)` 分组，`dws_features` 从 674 行/337 个 distinct `open_time` 变为两标的分组结果。验收脚本补 `check_a3`（`A3_REL_TOL = 1e-9`）与 `check_a2_live`，重写 `check_a7`（原 `grep` 会命中自己，永远失败），`main()` 现跑 A1/A2/A3/A7。`Makefile` 加 `migrate`/`instruments` 并让 `backfill` 依赖 `instruments`；`.env.example` 补 `KEEL_EXCHANGE_MARKET_TYPE`。**测试 154 个**（带 PG 153 passed / 1 skipped，无 PG 125 passed / 29 skipped）；v0.10 起为 174 个。文档修正 v0.8「多标的未验证」的错误表述（`runner.py` 本就是逐标的等权组合）、新增「验收项的可执行性」表（A1/A2/A3/A7/A9 可自动判定，A4 需人工接线，A5/A6/A8/A10 靠人）、新增 ADR-010。**整体 Compose 首次跑通**：新增一次性 `migrate` 服务并挡在所有 worker 之前（`service_completed_successfully`），此前 worker 会以 `UndefinedTable: relation "backtest_runs" does not exist` 无限重启；`Makefile` 加 `env`/`BUILDKIT` 变量。实测：518 个 USDT 现货对写入、325 个标的各回填 24–25 根、两标回测 SUCCEEDED、nginx 反代 `/api/` 返回同样 Envelope。 |
+| v0.10 | 2026-11-05 | **把整套系统跑起来，过程中修掉五个「不报错的错」**。① `scheduler/jobs.py::register` 把字符串 `"cron"` 当触发器传给 APScheduler，十个任务建成全通配 cron、同一毫秒全触发，日志看起来像正常调度（ADR-011）。② 回填 `plan` 的区间边界不对齐 K 线网格且尾部是闭区间，调度器每小时把已存在的 bar 重写一遍，原始湖 71311 行 / 24864 distinct（46447 行重复）。③ `data/dwd.py` 的异常判定整表 `diff()`，收益跨标的计算，两标的的真实异常全被吃掉。④ `data/lake.py::read_bars` 读侧不去重，只追加的写规则让每根 bar 出现多份（ADR-012）。⑤ `deploy/nginx.conf` 写死 `proxy_pass http://api:8000`，nginx 只在启动时解析一次，api 容器重建后 web 一直 502（ADR-013）。**新增**：`tests/test_scheduler.py`（14 个）、`tests/test_dwd.py` 补 3 个跨标的回归、`tests/test_lake.py` 补读侧去重、`schema.sql` 种入 `cost_models('default')` 并与 `runner.DEFAULT_COST` 对表。**测试 174 个**（带 PG 173 passed / 1 skipped，无 PG 143 passed / 31 skipped）。**实跑**：518 个标的各回填 45 天 1h（520399 行）→ ETL 545263 行 → 两标的 45 天回测 SUCCEEDED（`trade_count=70`、`max_drawdown=0.248`）→ `/reports` 带 disclaimer → web:15173 反代 `/api/` 200。 |
 
 ### v0.4 未做的事 → v0.5 的处理
 
@@ -1799,6 +1800,16 @@ docs/                       本文档
 - **`instruments` 没有软删除之外的审计**：`HALT` 保留了行，但「这个标的是什么时候从 TRADING 变 HALT 的」只能看 `updated_at`，没有逐次变更记录。
 - **文档与代码的测试数字仍需手工同步**：`README.md`、本文档 §13、附录 B 三处都写测试数量，改一次测试要改三处。没有自动检查（比如从 CI 读实际数字回写）。
 
+### v0.10 未做的事
+
+- **A6 的时延从未测过**：`/bars` 的 p95 < 300ms 是 §11.1 的验收项，本机 54 万行上跑得很快，但 `max_points` 降采样在 2000 点以上、以及多标的并发时的表现没量过。这一项要等有压力测试脚本才谈得上「通过」。
+- **A10 的恢复演练仍未做**：从零拉起一套环境（空 volume → migrate → sync → backfill → ETL → 回测）本轮走过一次，但那是「首次部署」不是「从备份恢复」。RTO 4h / RPO 24h 的目标值没有被任何一次实测支撑。
+- **1m 从未真实跑过**：45 天 × 518 标的 1h 是 52 万行、约 9 分钟；按同一速率推 1m 三年会接近文档估算的 2.2 小时量级，但权重限流是否触发 418/429、断点续传没做，都是未验证状态。批量回填目前单线程串行，518 个标的耗时 9 分钟——这个数字在 1m 上会成比例放大。
+- **告警从未真的送达过**：`alerts.send` 的 Telegram 分支需要真 token，本地通知分支依赖加了 `osascript` 的 macOS。本轮只验证了「失败路径会调用 `send`」，没有验证「人真的收到」。
+- **`ops_coverage` 只覆盖已回填的区间**：它的 `expected` 按「首根到末根」算，因此回填了多少就只有多少，不会提示「这只标的应该有三年的数据但现在只有 45 天」。这是一处语义缺口：覆盖率的分母是「已尝试的区间」，不是「应有的区间」。
+- **`backtest_runs.symbol` 列在多标的下有误导性**：`universe` 才是事实，`symbol` 只是 `universe[0]` 的快照。V1 前端不展示这一列，所以没造成误读，但它是下一个读代码的人会踩的坑。
+- **Docker volume 里残留了历史重复文件**：读侧已经收敛（ADR-012），但 `deploy_raw` 卷里 5231 个 parquet 文件仍在，其中含有边界修复之前写下的重复版本。要从物理上清掉得重跑一次回填，本轮没做。
+
 ---
 
 ## 附录 C 架构决策记录（ADR）
@@ -1828,6 +1839,30 @@ docs/                       本文档
 **这个结论有边界，且边界比结论重要**：一旦平台改为对外提供服务、分发数据或转售，H8 立刻不成立，整个「原始湖长期留存 + 可复现回测」的前提都要重做。建议在 V2 上线前再确认一次条款是否有变更；如果未来真要对外分享研究成果（例如公开策略回测报告），要先确认报告里的数据展示是否落在「重新分发」范围内。
 
 **同时注意这条结论的证据强度**：它是按 Binance 现行条款的通行解读得出的 `[Expert judgment]`，不是法律意见，也没有逐条附条款原文。真要倚赖它时，应自行核对条款原文的「Market Data」与「Redistribution」两节。
+
+### ADR-011　2026-11-05　定时任务的触发器必须由 cron 表达式构造
+
+**决策**：`scheduler/jobs.py::register` 用 `CronTrigger.from_crontab(job.cron, timezone=ZoneInfo("UTC"))` 构造触发器，不再写 `trigger="cron"`。
+
+**理由**：APScheduler 接受字符串 `"cron"` 时会用**全默认值**建一个 cron 触发器，也就是 `* * * * *`——每分钟跑一次。原先的写法看不出问题：调度器正常启动、日志正常打印 `next run at`、任务确实在跑。真正的症状是十个任务在同一毫秒全部触发，`build-marts` 与 `coverage-check` 本该差 15 分钟却撞在一起，后跑的那个撞 DuckDB 写锁报 `MartBusy`。错误被另一个错误掩盖了：如果只有一条任务，这个 bug 会表现为「某任务跑得比预期勤」，很难被注意到。`register` 改为返回注册好的 job 列表，因为未启动的调度器上 `get_jobs()` 会抛 `SchedulerNotRunningError`，测试拿不到触发器就没法断言。
+
+**影响**：`JOBS` 表的 `cron` 字段现在是唯一事实来源，改一行就改一行。任何新增任务必须在 `tests/test_scheduler.py` 里过一遍 `str(trigger) == str(CronTrigger.from_crontab(...))` 的逐条参数化断言——这条测试的存在理由是「占位触发器看起来完全正常」。
+
+### ADR-012　2026-11-05　原始湖的重复行在读侧收敛
+
+**决策**：`read_bars` 按 `(symbol, interval, open_time)` 排序 `ingested_at`/`revision` 后取最后一条；写侧继续保持「每分区一个新文件、不覆盖」。
+
+**理由**：ODS 只追加是刻意的（revision 历史、修订可追溯是 §5.5 的要求），所以同一根 bar 出现多份是**设计内的正常状态**，不是脏数据。去重放在写侧意味着丢掉历史换取整齐，方向反了；放在读侧则两边都对——磁盘上留全部版本，下游看到每根 bar 一行。根因还有一个：回填 `plan` 的边界没对齐 K 线网格（修在 `plan` 里），这个 bug 一天就能把同一根 bar 写 24 遍。读侧去重是**兜底**，不是让写侧可以随便重复。实测：修复前 71311 行 / 24864 distinct，修复后读回 24864 行。
+
+**影响**：`read_bars` 每次多一次 sort + drop_duplicates。V1 的数据量（54 万行、26MB）下可忽略；到亿行级要把去重下沉到 ETL 的 DuckDB 查询里（`qualify row_number() over (partition by ...) = 1`），届时这层读侧去重可以只保留给临时脚本用。
+
+### ADR-013　2026-11-05　nginx 反代必须用变量形式的上游
+
+**决策**：`deploy/nginx.conf` 写 `resolver 127.0.0.11 valid=10s` + `set $api_upstream http://api:8000` + `proxy_pass $api_upstream`，不写死 `proxy_pass http://api:8000`。
+
+**理由**：写死主机名时 nginx 只在**启动那一刻**解析一次 DNS，之后永远用那个 IP。容器重建会拿到新 IP，web 容器还指着旧地址——现场症状是 `/` 返回 200（静态文件与上游无关），`/api/` 全部 502 `connect() failed (111: Connection refused)`。这看起来像 api 挂了，实际 api 活得好好的（`curl 127.0.0.1:18000/api/v1/health` 正常）。走变量形式时 nginx 每个请求都按 `resolver` 重新解析。代价是失去 `proxy_pass` 的 URI 重写能力（这里不需要）以及多一次 DNS 查询（本地 Docker DNS，可忽略）。
+
+**影响**：任何新增的反代上游都照这个形状写。**这也是一个不该被「简化」掉的写法**——把它改回字面量在单容器调试时完全正常，只在重建 api 后才暴露。
 
 ### ADR-003　2026-11-05　VectorBT 不砍模块，砍验收
 

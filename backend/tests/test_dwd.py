@@ -53,3 +53,55 @@ def test_outlier_flag_on_absurd_jump() -> None:
     out = to_dwd(frame)
     assert out["is_outlier"].sum() == 1
     assert out.loc[out["is_outlier"], "open_time"].iloc[0] == pd.Timestamp("2023-11-01T02:00Z")
+
+
+def _two_symbols(prices_btc: list[float], prices_eth: list[float]) -> pd.DataFrame:
+    ts = pd.date_range("2023-11-01", periods=len(prices_btc), freq="h", tz="UTC")
+    frames = []
+    for symbol, prices in (("BTC/USDT", prices_btc), ("ETH/USDT", prices_eth)):
+        frames.append(
+            pd.DataFrame(
+                {
+                    "open_time": ts,
+                    "symbol": symbol,
+                    "interval": "1h",
+                    "open": prices,
+                    "high": [p * 1.01 for p in prices],
+                    "low": [p * 0.99 for p in prices],
+                    "close": prices,
+                    "volume": 10.0,
+                    "revision": 0,
+                    "ingested_at": pd.Timestamp("2023-12-01", tz="UTC"),
+                }
+            )
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_returns_are_not_computed_across_symbols() -> None:
+    """两个价格量级差 20 倍的标的放在一起，不能算出 "收益"。
+
+    不分组时，ETH 的首根减 BTC 的末根会得到一个 20 倍的价格比，MAD 基线被它抬高，
+    两个标的的真实异常都被吃掉——表现是 is_outlier 全 False。
+    """
+    frame = _two_symbols([40000.0] * 30, [2000.0] * 30)
+    out = to_dwd(frame)
+    assert out["is_outlier"].sum() == 0
+
+
+def test_outlier_on_each_symbol_is_judged_independently() -> None:
+    btc = [40000.0] * 20
+    # 单次跳空且不回头：只有一根 bar 的收益超过 HARD_JUMP，判定目标唯一。
+    btc[15:] = [200000.0] * 5
+    eth = [2000.0] * 20
+    out = to_dwd(_two_symbols(btc, eth))
+    flagged = out[out["is_outlier"]]
+    assert len(flagged) == 1
+    assert flagged["symbol"].iloc[0] == "BTC/USDT"
+    assert flagged["open_time"].iloc[0] == pd.Timestamp("2023-11-01T15:00Z")
+
+
+def test_output_is_time_ordered_within_symbol() -> None:
+    out = to_dwd(_two_symbols([40000.0] * 10, [2000.0] * 10))
+    for _, chunk in out.groupby("symbol"):
+        assert chunk["open_time"].is_monotonic_increasing

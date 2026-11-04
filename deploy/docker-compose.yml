@@ -31,8 +31,10 @@ services:
       POSTGRES_PASSWORD: keel
       POSTGRES_DB: keel
       TZ: UTC
+    # 宿主端口可覆盖：本机 5432 常被别的项目的 Postgres 占掉，
+    # 在 .env 里设 KEEL_HOST_PG_PORT 即可，不用停别人的容器。
     ports:
-      - "5432:5432"
+      - "${KEEL_HOST_PG_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -62,7 +64,7 @@ services:
     <<: *common
     command: ["uvicorn", "keel.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "8000:8000"
+      - "${KEEL_HOST_API_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
       interval: 30s
@@ -110,7 +112,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.web
     ports:
-      - "5173:80"
+      - "${KEEL_HOST_WEB_PORT:-5173}:80"
     restart: unless-stopped
     depends_on:
       - api

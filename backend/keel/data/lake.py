@@ -69,7 +69,10 @@ def _files(root: Path, dataset: Dataset, symbol: str | None, interval: str | Non
 
 
 def read_bars(root: Path, symbol: str | None = None, interval: str | None = None) -> pd.DataFrame:
-    """读回原始 K 线。空湖返回空 DataFrame（带列），让调用方少写一个 if。"""
+    """读回原始 K 线，每根 bar 只保留最新 revision。
+
+    空湖返回空 DataFrame（带列），让调用方少写一个 if。
+    """
     from keel.data.datasets import ODS_BARS
 
     files = _files(Path(root), ODS_BARS, symbol, interval)
@@ -80,7 +83,16 @@ def read_bars(root: Path, symbol: str | None = None, interval: str | None = None
     # 与写入时的 "BTC/USDT" 不一致——API 按 "BTC/USDT" 查就查不到任何东西。
     # 分区是给路径用的，列值以文件内容为准。
     table = pq.read_table(files, schema=BARS_SCHEMA, partitioning=pads.partitioning(pa.schema([])))
-    return table.to_pandas()
+    frame = table.to_pandas()
+    if frame.empty:
+        return frame
+    # 同一 (symbol, interval, open_time) 可能有多份：ODS 是只追加的，回填修正、
+    # 交易所修订、重跑都各写一个文件。读者要的是"每根 bar 一行"，不是文件内容。
+    # 去重放在读侧而不是写侧，是因为写侧一旦覆盖就丢了修订历史（§5.5 要求
+    # revision 不覆盖）。按 ingested_at/revision 取最新。
+    frame = frame.sort_values(["ingested_at", "revision"])
+    frame = frame.drop_duplicates(["symbol", "interval", "open_time"], keep="last")
+    return frame.sort_values("open_time").reset_index(drop=True)
 
 
 def list_partitions(root: Path, dataset: Dataset) -> list[tuple[str, str, int, int]]:

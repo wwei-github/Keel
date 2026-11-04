@@ -37,8 +37,13 @@ JOBS: tuple[Job, ...] = (
 )
 
 
-def register(scheduler) -> None:
-    """把 JOBS 注册到 APScheduler。时区固定 UTC，不读调度器默认值。
+def register(scheduler) -> list:
+    """把 JOBS 注册到 APScheduler，返回注册好的 Job 列表。
+
+    返回值不是装饰：调度器未启动时 ``scheduler.get_jobs()`` 会抛
+    ``SchedulerNotRunningError``，测试与运维脚本只能靠它拿到结果。
+
+    时区固定 UTC，不读调度器默认值。
 
     显式传 timezone 是必须的：APScheduler 默认用系统本地时区，
     在 macOS 上是 Asia/Shanghai，所有任务会整体偏 8 小时，
@@ -46,15 +51,26 @@ def register(scheduler) -> None:
     """
     from zoneinfo import ZoneInfo
 
+    from apscheduler.triggers.cron import CronTrigger
+
     from keel.workers import scheduler_worker
 
+    zone = ZoneInfo("UTC")
+    added = []
     for job in JOBS:
-        scheduler.add_job(
-            scheduler_worker.dispatch,
-            trigger="cron",
-            kwargs={"job_id": job.job_id},
-            id=job.job_id,
-            replace_existing=True,
-            timezone=ZoneInfo("UTC"),
-            misfire_grace_time=300,
+        # 必须用 CronTrigger.from_crontab 解析 job.cron。
+        # 直接写 trigger="cron" 而不给它表达式，APScheduler 会建出一个
+        # 所有字段都是 "*" 的 cron —— 也就是「每分钟都跑」，且不报错。
+        # 这个 bug 的表现是启动后十个任务同时触发、日志里每行都写
+        # "next run at: <now+1min>"，看起来像调度器在正常工作。
+        added.append(
+            scheduler.add_job(
+                scheduler_worker.dispatch,
+                trigger=CronTrigger.from_crontab(job.cron, timezone=zone),
+                kwargs={"job_id": job.job_id},
+                id=job.job_id,
+                replace_existing=True,
+                misfire_grace_time=300,
+            )
         )
+    return added

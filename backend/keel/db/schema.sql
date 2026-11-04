@@ -25,6 +25,15 @@ CREATE TABLE IF NOT EXISTS cost_models (
     valid_from      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 默认成本模型必须存在，否则 API-03 提交回测时 cost_model_id 指向一张空表，
+-- 而 backtest_runs.cost_model_id 在 V1 只有弱约束（见文件尾部），
+-- 于是「提交成功、跑起来才发现没有成本模型」——错误被推迟到最不方便的时候。
+-- 这里的数值与 keel.research.runner.DEFAULT_COST 必须一致：
+-- 两处不一致的表现是回测指标随「从哪条路径进来」而变。
+INSERT INTO cost_models (cost_model_id, fee_rate, slippage_bps, min_notional, funding_included)
+VALUES ('default', 0.001, 5.0, 5.0, FALSE)
+ON CONFLICT (cost_model_id) DO NOTHING;
+
 -- 策略参数配置。params 由 params_schema 校验（§3.7）
 CREATE TABLE IF NOT EXISTS strategy_configs (
     strategy_config_id TEXT PRIMARY KEY,

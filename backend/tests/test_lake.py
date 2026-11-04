@@ -77,3 +77,35 @@ def test_write_partition_rejects_schema_drift(tmp_path: Path) -> None:
     bad = _frame().drop(columns=["volume"])
     with pytest.raises(ValueError, match="missing columns"):
         write_partition(path, bad)
+
+
+def test_read_keeps_one_row_per_bar(tmp_path: Path) -> None:
+    """只追加的写规则会让同一根 bar 出现多份，读侧必须收敛成一行。
+
+    ODS 不覆盖是刻意的（revision 历史有用），但下游要的是"每根 bar 一行"。
+    把去重放在写侧相当于用丢历史换整齐，方向反了。
+    """
+    from keel.data.datasets import ODS_BARS
+    from keel.data.lake import partition_dir, write_partition
+
+    stamp = pd.Timestamp("2023-11-01T00:00Z")
+    for revision, close in ((1, 1.0), (2, 1.5), (1, 1.2)):
+        frame = pd.DataFrame(
+            {
+                "open_time": [stamp],
+                "symbol": ["BTC/USDT"],
+                "interval": ["1h"],
+                "open": [1.0],
+                "high": [2.0],
+                "low": [0.5],
+                "close": [close],
+                "volume": [10.0],
+                "revision": [revision],
+                "ingested_at": pd.to_datetime(["2023-12-01T00:00Z"], utc=True),
+            }
+        )
+        write_partition(partition_dir(tmp_path, ODS_BARS, "BTC/USDT", "1h", stamp), frame)
+
+    frame = read_bars(tmp_path, symbol="BTC/USDT", interval="1h")
+    assert len(frame) == 1
+    assert frame["close"].iloc[0] == 1.5  # 最新 revision 胜出
