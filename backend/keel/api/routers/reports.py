@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends
 
 from keel.api.deps import API_PREFIX, require_token
-from keel.api.schemas import Envelope
-from keel.errors import NotImplementedYet
+from keel.api.schemas import Envelope, Meta
 
 router = APIRouter(prefix=API_PREFIX, tags=["reports"], dependencies=[Depends(require_token)])
 
@@ -21,7 +22,21 @@ def get_report(run_id: str) -> Envelope[dict]:
     注意返回的是**数据**，不是 HTML——渲染交给前端，
     这样同一份数据能出网页报告、也能出 PDF。
     """
-    raise NotImplementedYet("API-10 get_report 尚未实现")
+    from keel.errors import NotFound
+    from keel.reports import artifacts
+
+    artifact_id = artifacts.latest_for_run(run_id)
+    if artifact_id is None:
+        raise NotFound(f"report not found for run: {run_id}")
+    path = artifacts.resolve(artifact_id)
+    return Envelope(
+        data={
+            "run_id": run_id,
+            "report": json.loads(path.read_text(encoding="utf-8")),
+            "content_url": artifacts.content_url(artifact_id),
+        },
+        meta=Meta(),
+    )
 
 
 @router.get("/artifacts/{artifact_id}")
@@ -30,4 +45,14 @@ def get_artifact(artifact_id: str) -> Envelope[dict]:
 
     返回绝对路径等于把内部目录结构写进公开协议，换存储就要破坏接口（§3.11）。
     """
-    raise NotImplementedYet("API-12 get_artifact 尚未实现")
+    from keel.reports import artifacts
+
+    path = artifacts.resolve(artifact_id)
+    return Envelope(
+        data={
+            "artifact_id": artifact_id,
+            "bytes": path.stat().st_size,
+            "content_url": artifacts.content_url(artifact_id),
+        },
+        meta=Meta(),
+    )

@@ -26,6 +26,7 @@ from keel.contracts import (
     Signal,
 )
 from keel.features import FEATURE_VERSION, donchian, sma
+from keel.research.registry import register
 
 __all__ = ["SmaCross", "DonchianBreakout"]
 
@@ -59,6 +60,8 @@ class SmaCross:
     """
 
     lookback: int = 61
+    strategy_key = "sma_cross"
+    strategy_version = 1
     params_schema: Mapping[str, Any] = field(
         default_factory=lambda: {
             "type": "object",
@@ -149,6 +152,8 @@ class DonchianBreakout:
     """
 
     lookback: int = 21
+    strategy_key = "donchian_breakout"
+    strategy_version = 1
     params_schema: Mapping[str, Any] = field(
         default_factory=lambda: {
             "type": "object",
@@ -220,3 +225,7 @@ class DonchianBreakout:
             ]
 
         return []
+
+
+register(SmaCross)
+register(DonchianBreakout)

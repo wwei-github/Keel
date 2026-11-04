@@ -2,6 +2,7 @@ import { NavLink, Route, Routes } from 'react-router-dom'
 import Health from './pages/Health'
 import Market from './pages/Market'
 import Backtests from './pages/Backtests'
+import Reports from './pages/Reports'
 
 function NotFound() {
   return <div className="muted">页面不存在。</div>
@@ -21,12 +22,16 @@ export default function App() {
         <NavLink to="/backtests" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
           回测
         </NavLink>
+        <NavLink to="/reports" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+          报告
+        </NavLink>
       </aside>
       <main className="content">
         <Routes>
           <Route path="/" element={<Health />} />
           <Route path="/market" element={<Market />} />
           <Route path="/backtests" element={<Backtests />} />
+          <Route path="/reports" element={<Reports />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>

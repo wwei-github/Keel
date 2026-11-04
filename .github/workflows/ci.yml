@@ -11,6 +11,23 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    # 需要真实 PG：db/queue/ops/bus 四组测试不 mock 数据库，
+    # 用 mock 测 SQL 等于只测了个字符串。没设 KEEL_TEST_PG_DSN 时它们会整文件 skip。
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: keel
+          POSTGRES_PASSWORD: keel
+          POSTGRES_DB: keel
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U keel -d keel"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      KEEL_TEST_PG_DSN: postgresql://keel:keel@127.0.0.1:5432/keel
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
@@ -21,6 +38,7 @@ jobs:
       # 而不是悄悄重新解析依赖（见 pyproject 里的 Q7 说明）。
       - run: uv sync --frozen
       - run: uv run ruff check .
+      - run: uv run ruff format --check .
       - run: uv run pytest
 
   frontend:

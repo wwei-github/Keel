@@ -17,6 +17,12 @@ def sql() -> str:
     return SCHEMA_FILE.read_text(encoding="utf-8")
 
 
-def migrate(dsn: str) -> None:
-    """对目标库执行 schema。幂等。"""
-    raise NotImplementedError("迁移执行尚未实现：等待 psycopg 连接层")
+def migrate(dsn: str | None = None) -> None:
+    """对目标库执行 schema。幂等——所有语句都是 IF NOT EXISTS / ADD COLUMN IF NOT EXISTS。"""
+    import psycopg
+
+    from keel.config import get_settings
+
+    target = dsn or get_settings().pg_dsn
+    with psycopg.connect(target, autocommit=True) as conn:
+        conn.execute(sql())

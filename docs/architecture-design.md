@@ -5,7 +5,7 @@
 > 系统阶段：全新系统（Greenfield），无既有代码与既有数据
 > 使用者：本人（开发、研究、交易与运维均由一人承担）
 > 上游输入：口头需求（九组件链路），无 PRD
-> 版本：2026-11-05 / v0.7
+> 版本：2026-11-05 / v0.8
 > 当前交付目标：V1 研究回测版（历史数据、回测、报告与查看），交易执行从 V2 开始
 
 ---
@@ -991,7 +991,7 @@ erDiagram
 | `dws_signals` | 信号 | `date` | `signal_id, instance_id, instrument_id, strategy_version, feature_version, direction, trigger_type` |
 | `ads_backtest_runs` | 运行 | `run_date` | `run_id, snapshot_id, metrics, artifact_id` |
 | `ads_allocations` | 分配 | `run_date` | `allocation_id, weights, constraints, turnover` |
-| `ops_coverage` | 覆盖度 | `dataset / date` | `symbol, first_ts, last_ts, gaps, duplicates, blocking_gaps, archived` |
+| `ops_coverage` | 覆盖度（**派生表**，由 ETL 从原始湖算出，回填进程不写它） | `symbol / interval` | `symbol, interval, start, end, expected, present, blocking_gaps, gaps` |
 | `ods_orders` | 订单导出 | `date` | `order_id, client_order_id, exchange_order_id, instance_id, instrument_id, side, type, qty, price, status, created_at, updated_at` |
 | `ods_fills` | 成交导出 | `date` | `fill_id, order_id, exchange_fill_id, qty, price, fee, fee_currency, filled_at` |
 | `ods_positions` | 持仓导出 | `date` | `position_id, instance_id, instrument_id, qty, entry_price, realized_pnl, unrealized_pnl, updated_at` |
@@ -1400,8 +1400,8 @@ V1 只保留历史数据、研究、报告与查看四条路径。图中没有�
 
 | 类别 | V1 包含 | 延后 |
 |---|---|---|
-| PostgreSQL 表 | `instruments`、`cost_models`、`strategy_configs`、`sleeves`（可空表）、`backtest_runs`、`job_runs`、`artifacts`、`events`、`consumer_offsets`、`consumed_events`、`late_events`、`audit_log`、`heartbeats` | `orders`、`fills`、`positions`、`risk_limits`、`recon_diffs`、`allocation_runs`、`allocation_weights`、`runtime_flags`、`features_live`（V2） |
-| DuckDB 数据集 | `ods_bars`、`dwd_bars`、`dws_features`、`ads_backtest_runs`、`ops_coverage` | `ods_funding`（永续专用，V3 启用；V1–V2 不建表）、`ods_open_interest`（持仓量，按研究需求启用）、`dws_signals`（实盘信号）、`ads_allocations`、`ods_orders`/`ods_fills`/`ods_positions`/`ods_recon_diffs`（V2 起有数据） |
+| PostgreSQL 表 | `instruments`、`cost_models`、`strategy_configs`、`sleeves`（可空表）、`backtest_runs`、`job_runs`、`artifacts`、`events`、`consumer_offsets`、`consumed_events`、`late_events`、`audit_log`、`heartbeats`、`alert_log` | `orders`、`fills`、`positions`、`risk_limits`、`recon_diffs`、`allocation_runs`、`allocation_weights`、`runtime_flags`、`features_live`（V2） |
+| DuckDB 数据集 | `dwd_bars`、`dws_features`、`ops_coverage`、`ds_meta`（集市版本与构建时间；`ods_bars` 是 Parquet 原始湖，不落 DuckDB） | `ads_backtest_runs`（回测结果已进 PG `backtest_runs` + 制品文件，是否需要 DuckDB 副本待定）、`ods_funding`（永续专用，V3 启用；V1–V2 不建表）、`ods_open_interest`（持仓量，按研究需求启用）、`dws_signals`（实盘信号）、`ads_allocations`、`ods_orders`/`ods_fills`/`ods_positions`/`ods_recon_diffs`（V2 起有数据） |
 | REST 接口 | API-01、API-02、API-03、API-04、API-05、API-10、API-11、API-12 | API-06、API-07、API-08、API-09、API-13、API-14、API-15 |
 | Web 页面 | 行情浏览、数据覆盖、回测列表与详情、报告索引 | 实盘持仓、订单、撤单、总开关、组合分配 |
 
@@ -1428,9 +1428,9 @@ V1 只保留历史数据、研究、报告与查看四条路径。图中没有�
 | 编号 | 验收项 | 判定 |
 |---|---|---|
 | A1 | 数据覆盖 | 约定标的池与回测区间内，1h/4h/1d 覆盖率不低于 99.5%，且 `blocking` 缺口数为 0；全部缺口（含 `tolerated`）逐条可列出，含起止时间与判定依据 |
-| A2 | 回填幂等 | 同一分片重复执行不产生重复行（行数与 `revision` 集合不变），修订以新增 `revision` 追加而非覆盖 |
-| A3 | 指标一致（两处） | 同一输入、同一 `feature_version` 下，ETL 的 `dws_features` 与 Freqtrade 回测路径的指标值逐值一致（浮点按 1e-9 相对误差比较）。实现前提是两者都调用 `keel.features.compute`，不允许各自实现。**VectorBT 筛选路径不在本项验收范围内**（见下方说明） |
-| A4 | 回测可复现 | 同一 `run_id`（同代码版本、同 `config_hash`、同 `data_snapshot_id`、同随机种子）重跑，成交明细与指标完全一致，差异为零 |
+| A2 | 回填幂等 | 同一分片重复执行不产生重复行（行数与 `revision` 集合不变），修订以新增 `revision` 追加而非覆盖。V1 的做法是两层：`plan` 按已有覆盖裁剪（重跑同区间直接返回空任务），分区文件只追加不覆盖。判定用 `keel.tools.acceptance.check_a2`（第二次写入行数为 0） |
+| A3 | 特征一致（两处） | 同一输入、同一 `feature_version` 下，ETL 产出的 `dws_features` 与 `keel.features.compute` 的现算值逐值一致（浮点按 1e-9 相对误差比较）。V1 的第二条路径是自建执行器 `keel-bar`（ADR-009），它在决策时调 `keel.features.compute`，所以这条实际守的是「批量算的特征」与「决策时现算的特征」不漂移。**VectorBT 与 Freqtrade 路径均不在 V1 本项范围内**（见下方说明） |
+| A4 | 回测可复现 | 同一输入（同代码版本、同 `data_snapshot_id`、同参数、同 `cost_model_id`、同引擎）重跑，成交明细与指标完全一致，差异为零。V1 的判定方式由 `keel.tools.acceptance.check_a4` 给出：两次 `execute_run` 的 metrics 经 `json.dumps(sort_keys=True)` 后逐字节相等——这比「看起来一样」严格，比「逐根 K 线比」粗糙，折中点与 §7 的浮点口径（1e-9）一致 |
 | A5 | 引擎差异有记录 | VectorBT 筛选与 Freqtrade 事件驱动回测的结果差异必须被记录：给出差异金额、笔数、样本区间与收益率偏差，写入回测报告附录。**V1 不要求归因到具体类别**——归因（成本/成交假设/数据对齐/滑点）移到 V2 的 B11 |
 | A6 | 查询时延 | 2000 点 K 线查询 p95 低于 300 毫秒；回测详情首屏（不含大批量明细）低于 1 秒 |
 | A7 | 安全边界 | V1 部署中：不存在交易所私有 API Key（含环境变量、文件、密钥链引用）；`execution-gateway` 容器未启动；配置中不存在启用状态的实盘账户；全仓静态扫描不到下单调用路径（可命中 Freqtrade/CCXT 库代码，但自有代码中无调用） |
@@ -1438,7 +1438,7 @@ V1 只保留历史数据、研究、报告与查看四条路径。图中没有�
 | A9 | 策略契约冻结 | `decide(window, bar, params, position, state) -> list[Signal]` 签名、`lookback`、`required_lookback`、参数 schema、特征入口、`cost_models`、输出登记**七项**在 V1 结束时冻结并写入手册；**判定以 `keel/contracts.py` 通过 `tests/test_contract.py` 为准**（当前 40 passed），不以文档里写了签名为准；属性测试覆盖双均线与唐奇安突破两个玩具策略，并做过变异测试确认断言有效（§3.7） |
 | A10 | 恢复可用 | 从零环境按备份恢复（PG + 原始湖），重建集市后可复跑一个样本回测并通过 A4；记录实际 RTO |
 
-**关于 A3 从「三处」改为「两处」**：初版要求 `dws_features`、VectorBT、Freqtrade 三处逐值一致。但 VectorBT 是向量化实现，它的成本模型与成交假设本来就和事件驱动路径不同（例如它按 bar 收盘价一次性成交，不模拟逐笔滑点），要求「指标值逐值一致」在语义上就不成立——一致的应该只是特征值，而不是回测指标。把 VectorBT 移出 A3，只是承认了这个事实，不是降低标准。真正的特征一致性仍由 `dws_features` 与 Freqtrade 两处保证。
+**关于 A3 的两次收窄（三处 → 两处 → 具体到 keel-bar）**：初版要求 `dws_features`、VectorBT、Freqtrade 三处逐值一致。第一次收窄的理由是 VectorBT 向量化的成本模型与事件驱动路径本就不同（按 bar 收盘价一次性成交、不模拟逐笔滑点），要求「指标值逐值一致」在语义上不成立——一致的应该只是**特征值**，不是回测指标。第二次收窄发生在这个计划实际落地时（v0.8）：Freqtrade 的 `IStrategy.populate_*` 接口与 `decide()` 契约不同，适配是一整块独立工作，V1 改用自建执行器 `keel-bar`（ADR-009）；它逐 bar 调 `keel.contracts.run_decide`，决策时现算特征。于是 A3 守的东西没变——仍是「批量算的特征」与「决策时现算的特征」不漂移——只是第二条路径从 Freqtrade 换成了 `keel-bar`。这不是降低标准，而是把「本版真正会跑的那条路径」写进验收。
 
 **关于 A5 移出 V1**：差异归因是个无底洞——「这笔差异到底是滑点假设不同，还是 bar 边界对齐不同」这个问题，在有真实成交对照之前永远说不清。V1 只有一套引擎真正参与验收（Freqtrade），VectorBT 只是筛选器，此时做归因不产生业务价值，反而会消耗几周时间。V1 只要求记录差异金额与笔数，归因能力随 V2 的纸面交易记录一起引入（B11）。
 
@@ -1593,19 +1593,19 @@ flowchart TB
 
 ## 13. 工程骨架与文档映射
 
-代码骨架已按本文的模块划分落地（2026-11-05，v0.7）。这一节记录**文档的哪一节对应代码的哪个包**，以及骨架阶段哪些东西是刻意的空壳。骨架的含义是：目录、接口形状、配置与部署编排就位，但除契约与特征外没有实现。
+代码已按本文的模块划分落地（v0.7 骨架 → v0.8 V1 实现完成）。这一节记录**文档的哪一节对应代码的哪个包**，以及哪些东西是刻意的空壳。骨架的含义是：目录、接口形状、配置与部署编排就位。
 
 ### 13.1 单仓双目录
 
 ```
 backend/                    Python 服务
-  keel/                     主包（51 个模块，约 2000 行，含 docstring）
-  tests/                    契约测试 40 个 + API 形状测试 4 个
+  keel/                     主包（68 个模块，约 4000 行）
+  tests/                    137 个测试（契约 40 + 领域与 API 97）
   pyproject.toml, uv.lock
 web/                        Vite + React + TypeScript
   src/api/                  HTTP 客户端（Envelope 解包、错误规格化）
   src/components/           K 线图、陈旧数据横幅、未实现提示
-  src/pages/                系统状态、行情、回测
+  src/pages/                系统状态、行情、回测、报告
 deploy/                     docker-compose、Dockerfile、nginx
 docs/                       本文档
 ```
@@ -1619,20 +1619,21 @@ docs/                       本文档
 | 文档 | 代码 | 骨架状态 |
 |---|---|---|
 | §3.7 策略契约 | `backend/keel/contracts.py` | **已实现**，40 个测试通过（A9） |
-| §2.5.5 特征计算 | `backend/keel/features.py` | **已实现**，6 个特征 |
-| §3.3 ETL | `backend/keel/data/` | 数据集定义已定，`run_once` 未实现 |
-| §3.1 采集 / §3.2 回补 | `backend/keel/market/` | 未实现（V1 只需回补） |
-| §2.5.6 回测执行器 | `backend/keel/research/` + `workers/backtest_worker.py` | 状态机与认领接口已定，引擎未接 |
+| §2.5.5 特征计算 | `backend/keel/features.py` | **已实现**，6 个特征，ETL 与回测共用 |
+| §5.5 点时间规则 / §3.3 ETL | `backend/keel/data/` | **已实现**：`lake`（Parquet 读写）、`dwd`（清洗）、`coverage`（缺口分级）、`etl`（原子发布 `dwd_bars`/`dws_features`/`ops_coverage`） |
+| §3.2 历史回补 | `backend/keel/market/{exchange,normalize,backfill}.py` | **已实现**：Binance 适配器、K 线归一化、按已有覆盖裁剪的幂等回补 |
+| §3.1 实时采集 | `backend/keel/market/collector.py` | 未实现（V2 才需要实时） |
+| §2.5.6 回测执行器 | `backend/keel/research/` + `workers/backtest_worker.py` | **已实现（`keel-bar`）**：注册表、逐 bar 执行器、指标、队列认领、报告制品 |
 | §3.5 执行 / §3.6 风控 | `backend/keel/execution/`、`risk/` | 未实现（V2） |
 | §3.4 策略运行时 | `backend/keel/runtime/` | 未实现（V2） |
 | §3.8 组合分配 | `backend/keel/portfolio/` | 未实现（V3） |
-| §3.9 报告 | `backend/keel/reports/` | 年化因子已定，生成未实现 |
-| §3.10 调度 | `backend/keel/scheduler/jobs.py` | 六个任务已列，注册未实现 |
-| §2.5.2 事件通道 | `backend/keel/events/bus.py` | 九个 topic 已定，收发未实现 |
-| §5.2/§5.3 表结构 | `backend/keel/db/schema.sql` | 八张表 DDL 已写 |
-| §6 接口 | `backend/keel/api/` | 路由与形状已定，除 `/health` 外返回 `501` |
-| §2.5.7 告警与心跳 | `backend/keel/ops/` | 分级已定，发送未实现 |
-| §9 部署 | `deploy/` | Compose 与镜像定义完成 |
+| §3.9 报告 | `backend/keel/reports/{quantstats,artifacts}.py` | **已实现**：年化因子、指标、JSON 制品（带 disclaimer） |
+| §3.10 调度 | `backend/keel/scheduler/jobs.py` + `workers/scheduler_worker.py` | **已实现**：9 个任务注册与分派（UTC） |
+| §2.5.2 事件通道 | `backend/keel/events/bus.py` | **已实现**：PG 表 + `LISTEN/NOTIFY`、序号水位、去重、保留 30 天 |
+| §5.2/§5.3 表结构 | `backend/keel/db/{schema.sql,pool.py,mart.py,migrations.py}` | **已实现**：11 张表 + 幂等追加列、连接池、DuckDB 单写者原子发布 |
+| §6 接口 | `backend/keel/api/` | **V1 接口全部实现**（API-01/02/03/04/05/10/11/12）；API-09/15 刻意留 `501`（V2） |
+| §2.5.7 告警与心跳 | `backend/keel/ops/{alerts,heartbeat}.py` | **已实现**：Telegram 主 + 本地备、按 `alert_key` 抑制、dead-man switch |
+| §9 部署 | `deploy/` | Compose 与镜像定义完成，**镜像仍未构建过** |
 
 ### 13.3 骨架阶段刻意做的事
 
@@ -1645,12 +1646,21 @@ docs/                       本文档
 5. **Vite 显式绑 `127.0.0.1`**。默认 `localhost` 在 macOS 解析到 `::1`，于是 `curl 127.0.0.1:5173` 连不上，而浏览器却正常。
 6. **健康检查不探数据库**。探库的健康检查会在 PG 重启时把 API 一起判死，把局部故障放大成全面故障。
 
-### 13.4 骨架未验证的东西
+### 13.4 已验证与仍未验证的
 
-- **Docker Compose 未真正起过**：镜像构建、卷挂载、容器间 DNS 均未验证。`backtest-worker` 的 `mem_limit` 与 `KEEL_BACKTEST_*` 环境变量是否被 `config.py` 读到，只有在容器里跑才知道。
-- **数据库 DDL 未在真实 PG 上执行**：`schema.sql` 是手写的，未跑过 `psql -f`。
-- **前端未接真实数据**：除 `/health` 外所有请求都吃 `501`，K 线组件的渲染路径没被真实数据走过。
-- **`web` 的类型检查过、构建过，但页面没在浏览器里点过**。
+已验证（v0.8）：
+
+- **数据库 DDL 在真实 PostgreSQL 16 上执行过**，`migrate()` 可重复执行。
+- **回填→ETL→回测→报告→API 全链路跑通**：真实 Binance `BTC/USDT` 1h，2024-01-01 至 2024-01-15 共 337 根，回测 SUCCEEDED，报告制品带 disclaimer，四个接口全部 200。
+- **测试**：带 PG 时 136 passed / 1 skipped；不带 PG 时 113 passed / 24 skipped（跳过的是必须真库的队列、事件与集成测试）。
+- **前端接真实数据**：`tsc --noEmit` 与 `npm run build` 通过，四个页面经 Vite 代理取到真实响应。
+
+仍未验证：
+
+- **Docker 镜像从未构建成功**：`docker compose config` 语法通过，但 `docker build` 没跑成（校验时 daemon 不可用）。容器内 `uv sync --frozen --no-dev` 是否成立未知。
+- **Docker Compose 未真正启动过**：容器间 DNS、卷挂载、`mem_limit`、`KEEL_*` 注入均未验证。
+- **页面没在浏览器里点过**：只验证了构建产物与接口响应，交互（图表渲染、表单提交、路由跳转）未人工确认。
+- **只有单标的、单区间真跑过**：多标的 `universe`、1m 长回填、限流长跑均未实测（见附录 B「v0.8 未做的事」）。
 
 ---
 
@@ -1687,8 +1697,8 @@ docs/                       本文档
 | v0.4 | 2026-11-04 | 补齐 2.5「运行时、通信与控制面」（事件通道、控制面传播、实盘特征路径、回测执行器、告警与 dead-man switch、时区）；修正内部矛盾（采集器定位、只读 API 命名、指标计算位置、缺口准入、快照哈希、风控调用方式）；补齐数据与接口缺口（`symbol` 分区维度、`exchange_order_id`/`exchange_fill_id`、撤单与订单查询接口、`stale` 字段、`strategy_configs`/`sleeves`/`allocation_weights`/`events`/`runtime_flags`/`audit_log`/`heartbeats` 表、制品 URL 化、降采样语义）；修正数值与表述（容量表按公式重算、分钟年化因子 525600、GPL 表述、策略隔离表述、PG 加密方式、保留与只追加的调和、恢复演练）；重写验收标准（A3/A5/A7/B3/C3 可判定化，新增 A9 策略契约、A10 恢复、B9 特征一致、B10 告警可达）；待确认清单分级为阻塞项与可延后项；补 PG→原始湖单向导出（`export-tx`，`ods_orders`/`ods_fills`/`ods_positions`/`ods_recon_diffs`）；事件表加 `seq` 单调水位（uuid 不能当水位）、`late_events` 表；全文档「只读 API」统一为「服务 API」并说明控制类写操作；时序图补网关二次校验总开关；风控闸门明确为网关进程内模块（同步调用，不独立容器）；实盘特征落 PG `features_live` 而非 DuckDB（避免破坏单写者约束）；`backtest_runs` 加 `stale` 并定义修订后的处置策略；表名统一（`ops_data_gaps`→`ops_coverage`、`dim_instrument`→`instruments`、`recon_diff`→`recon_diffs`）；§7.1 性能指标补口径定义 |
 | v0.5 | 2026-11-05 | **范围收窄**：H2 改为 Binance + 仅现货，永续延后 V3（§0.2）；`instruments` 去掉 `leverage_brackets`、加 `status`（§5.2/§5.3）；API-08 持仓响应去掉 `leverage`/`liquidation_price`；风控闸门的「杠杆与保证金校验」改为「敞口与可用余额校验」（§3.6）；`ods_funding`/`ods_open_interest` 标注为 V3 或按需启用。**策略契约五处修订**（§3.7）：`decide` 返回值改 `list[Signal]`、`position` 收窄为单标的、新增 `lookback` 且窗口不含当前 bar、成本模型拆出独立表 `cost_models`、允许注入 `state: dict` 由运行时持久化。**验收调整**：A3 从三处改为两处（VectorBT 移出）、A5 降级为「记录差异不要求归因」、新增 B11「引擎差异可归因」（V2）、A9 判定以 `keel/contracts.py` 通过测试为准。**待确认关闭**：Q1、Q10 关闭，Q9 降至 V2。**新增附录 C ADR 决策记录** |
 | v0.6 | 2026-11-05 | **契约落地为代码**。新增 `keel/contracts.py`（Strategy Protocol、Signal、BarView、PositionView、CostModel、`slice_window`、`check_window_fits`、`run_decide` 输出校验）、`keel/features.py`（`sma`/`donchian`/`atr`/`roc` 原语与 `compute` 固定特征集）、`keel/strategies.py`（双均线交叉、唐奇安突破）、`tests/test_contract.py`（40 个测试，含 hypothesis 属性测试）、`pyproject.toml` + `uv.lock`（Q7）。**契约由六项扩为七项**：新增修订 ⑥ `required_lookback(params)`（堵住「参数超出窗口导致静默无信号」）、修订 ⑦ `decide` 增加 `bar: BarView`（窗口与决策点分离，突破策略才拿得到当前收盘价）。§3.7 补「变异测试」小节，记录三次注入破坏各失败多少测试。A9 判定更新为七项并标注已完成；Q7、Q8 移入「已关闭的阻塞项」；新增 ADR-006（契约从文档评审改为代码验证）、ADR-007（`lookback` 与 `required_lookback` 的分工） |
-
-| v0.7 | 2026-11-05 | 本版。**工程骨架落地**（新增 §13）。仓库改为单仓双目录（`backend/` + `web/`），新增 `backend/keel` 下 15 个子包骨架（api/data/market/research/execution/risk/runtime/portfolio/reports/scheduler/events/db/ops/workers）、`web`（Vite + React + TS + lightweight-charts）、`deploy`（docker-compose + Dockerfile + nginx）、`.github/workflows/ci.yml`、`Makefile`、`README.md` 重写。新增 `keel/config.py`（frozen Settings）、`errors.py`（`ErrorCode` 稳定枚举）、`logging.py`（JSON 行日志）、`api/`（Envelope + `meta.stale` + 统一错误处理 + 五个 router）、`db/schema.sql`（八张表 DDL）、`workers/`（三个常驻进程入口）。开发依赖改用 PEP 735 `dependency-groups`。全文新增 §13 记录「文档章节 → 代码包」映射与骨架阶段刻意做的六件事、未验证的四件事 |
+| v0.7 | 2026-11-05 | **工程骨架落地**（新增 §13）。仓库改为单仓双目录（`backend/` + `web/`），新增 `backend/keel` 下 15 个子包骨架（api/data/market/research/execution/risk/runtime/portfolio/reports/scheduler/events/db/ops/workers）、`web`（Vite + React + TS + lightweight-charts）、`deploy`（docker-compose + Dockerfile + nginx）、`.github/workflows/ci.yml`、`Makefile`、`README.md` 重写。新增 `keel/config.py`（frozen Settings）、`errors.py`（`ErrorCode` 稳定枚举）、`logging.py`（JSON 行日志）、`api/`（Envelope + `meta.stale` + 统一错误处理 + 五个 router）、`db/schema.sql`（八张表 DDL）、`workers/`（三个常驻进程入口）。开发依赖改用 PEP 735 `dependency-groups`。全文新增 §13 记录「文档章节 → 代码包」映射与骨架阶段刻意做的六件事、未验证的四件事 |
+| v0.8 | 2026-11-05 | **V1（研究回测）实现完成**。21 个任务的实施计划落盘于 `docs/superpowers/plans/2026-11-04-v1-research-backtest.md`。新增实现：`db/pool.py`（`ConnectionPool` + `dict_row`）、`db/mart.py`（flock 单写者 + 临时文件原子发布）、`data/{schemas,lake,coverage,dwd,etl}.py`、`market/{normalize,exchange,backfill}.py`、`research/{registry,simulator,metrics,runner,backtest,engine}.py`、`reports/{quantstats,artifacts}.py`、`events/bus.py`（PG 表 + `LISTEN/NOTIFY`）、`ops/{alerts,heartbeat}.py`、`scheduler/jobs.py`、`workers/{etl,backtest,scheduler}_worker.py`、`tools/{acceptance,backfill,exchange_factory}.py`、`api/{downsample,routers/*}.py`。**范围与口径修订**：`ops_coverage` 改为 ETL 派生表（ADR-008）；V1 执行器改为自建 `keel-bar`，Freqtrade 适配推 V1.5（ADR-009）；A3 随之收窄为「`dws_features` 与 `keel-bar` 决策时现算的特征逐值一致」。**验收**：137 个测试（带 PG 136 passed / 1 skipped，无 PG 时 113 passed / 24 skipped）。**真实数据端到端跑通**：Binance 回填 337 行 → ETL 建三张集市表 → 回测 SUCCEEDED → 报告制品带 disclaimer → API 四项 200 → Web 四页接真数据。附录 B 新增「v0.8 未做的事」 |
 
 ### v0.4 未做的事 → v0.5 的处理
 
@@ -1720,6 +1730,17 @@ docs/                       本文档
 - **`schema.sql` 没在真实 PostgreSQL 上执行过**：DDL 手写，字段类型、外键顺序、索引是否成立都未验证（建表顺序本身是按依赖排过的）。
 - **前端只接过 `/health`**：K 线图、行情页、回测页的渲染路径从未被真实数据走过。`lightweight-charts` 的 `setData` 在空数组、单点、乱序数据下的行为未测。
 - **没有任何 ETL、回测、交易的实现**：骨架阶段只定义形状。第一个真实功能（历史回补 + L1 ETL + 一条能跑的回测）仍需按 §11.1 的顺序做。
+
+### v0.8 未做的事
+
+- **Freqtrade 与 VectorBT 的适配没有做**：V1 的执行器是自建的 `keel-bar`（ADR-009）。`engine.py` 里另外两个枚举值直接抛 `NotImplementedError`，所以 V1 的回测结果**无法与 Freqtrade 对拍**。这项能力要在 V2 上实盘前补上——原因是实盘的真实性问题比回测引擎的对照问题更早发生。
+- **`ops_coverage` 只有一份派生结果，没有历史**：它每次 ETL 重算并随集市一起原子发布，因此「昨天的覆盖率是多少」查不到。要追溯得看 `audit_log` 与原始湖分区本身（信息都在，只是没有便利查询）。
+- **回填只用 1h/4h/1d 真跑过 337 行**：1m 的 7900 万行路线从未在真实限流下跑过。按文档估算约 2.2 小时，但 Binance 的权重限流在长跑下的表现（是否会触发 418/429 冷却）未实测。
+- **告警只验证了抑制逻辑，没验证送达**：`send()` 的 Telegram 分支需要真实 bot token 才会发出去；测试里走的是 `_suppress` 与本地通知分支。dead-man switch 的心跳缺失告警同理，代码路径通了但端到端未验证。
+- **多标的仍未验证**：所有端到端验证都只有 `BTC/USDT` 一个标的。`universe` 是列表、回测按单标的算——多标的语义要等 V3 的组合分配才有意义，但「传两个标的会怎样」目前是未定义行为（会默默只用第一个）。
+- **鉴权未启用**：`require_token` 在未配 `KEEL_API_TOKEN` 时放行（开发模式）。部署到非本机地址前必须先配上，这条写在这里是因为它默认是关的。
+- **`ads_backtest_runs` 数据集未建**：文档 §5.4 列了它，代码里回测结果直接进 PG `backtest_runs` + 制品文件。是否还需要一份 DuckDB 的副本用于跨运行分析，等有多次回测后再定。
+- **没有迁移框架**：`schema.sql` 是幂等 DDL（`create table if not exists` + `add column if not exists`），只能往前走不能回滚。字段改名或删除需要手写迁移，而现在一套都没有。
 
 
 ---
@@ -1792,3 +1813,19 @@ docs/                       本文档
 **理由**：只看其中一个都不行。只有 `lookback`，参数就能申请到超出窗口的历史，结果是**静默无信号**（不是报错，是这一根 bar 返回空列表，循环继续，日志干净）。只有 `required_lookback`，运行时又不知道该预取多少数据——预取必须发生在拿到参数之前，而参数会改变需求。两个字段分别回答「最多准备多少」和「这组参数要多少」。
 
 **影响**：参数 schema 的上限不再能独立决定策略行为，改参数上限时可能撞上 `lookback`。这是好的耦合——它把「配置与实现不匹配」从运行时静默故障提前到启动时报错。代价是每个策略多一个约三行的方法，漏写时退回旧行为（只校验 `lookback`），不会更糟。
+
+### ADR-008　2026-11-05　`ops_coverage` 是 ETL 派生表，回填进程不写它
+
+**决策**：`ops_coverage` 由 ETL 在重建集市时从原始湖算出，回填器（`market/backfill.py`）**不写**这张表。缺口信息由回填器返回的 `JobResult` 与 ETL 的覆盖率分析共同表达。
+
+**理由**：DuckDB 只允许一个写者（§3.3）。如果回填进程也写覆盖率，就出现两个写者，而它们的写入时机完全独立——回填在盘中、ETL 在凌晨，最终会互相覆盖，且谁覆盖谁取决于调度先后，不是数据本身。另一个原因是**覆盖率必须相对完整的数据算**：回填途中算出的覆盖率天然偏低，把它落地会制造假告警。
+
+**影响**：覆盖率有延迟（最迟到下一次 ETL），所以盘中的缺口不能靠查 `ops_coverage` 发现，只能靠回填器返回值和告警。这个代价是有意接受的——真需要盘中缺口时，那属于 V2 的采集器职责，不是回填器职责。
+
+### ADR-009　2026-11-05　V1 用自建执行器 `keel-bar`，Freqtrade 适配推到 V1.5
+
+**决策**：V1 的回测执行器是 `backend/keel/research/simulator.py` 的逐 bar 循环 + `contracts.run_decide`，`Engine` 枚举里叫 `keel-bar`。Freqtrade 与 VectorBT 的适配都不在 V1 范围内。
+
+**理由**：Freqtrade 的策略接口是 `IStrategy.populate_*`（一整套批量算指标 + 生成信号的钩子），与我们的 `decide()` 契约是两种心智模型。适配它要写一层把 DataFrame 喂给 populate、再把 `enter_long` 列翻译成 `Signal` 的胶水，还要处理它自带的风控与仓位模型——这是一整块独立工作，塞进 V1 会推迟数据链路。而 A3 真正要防的风险是「批量算的特征」与「决策时现算的特征」漂移，`keel-bar` 逐 bar 调同一个 `keel.features.compute`，这个风险它直接覆盖。
+
+**影响**：V1 的回测结果**不能**和 Freqtrade 对拍，A3 的第二条路径换成 `keel-bar`（见 §11.1 的说明段）。这削弱了「与成熟引擎对齐」这个信心来源，换成「与自己的实盘路径对齐」——考虑到 V2 实盘也走 `decide()`，后者对 V2 更有价值。代价是回测结果的绝对可信度上限降低：一个自己写的执行器，成交假设错了没人能替我们发现。缓解办法是 V1.5 接 Freqtrade 做对拍，这件事必须在 V2 上实盘之前完成。

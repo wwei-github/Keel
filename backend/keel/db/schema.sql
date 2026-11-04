@@ -120,3 +120,59 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     finished_at   TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_status ON backtest_runs (status, created_at);
+
+-- 回测作业补列：universe 让一次提交覆盖多个标的（§6.3 API-03）
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS universe JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS engine TEXT NOT NULL DEFAULT 'keel-bar';
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS engine_version TEXT;
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS data_snapshot_id TEXT;
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS metrics JSONB;
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS error TEXT;
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS strategy_key TEXT;
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS strategy_version INTEGER DEFAULT 1;
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS params JSONB;
+ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS cost_model_id TEXT;
+
+-- 批处理作业台账（§5.3）。checkpoint 存水位线，export-tx 靠它决定从哪继续
+CREATE TABLE IF NOT EXISTS job_runs (
+    job_run_id  BIGSERIAL PRIMARY KEY,
+    job_id      TEXT NOT NULL,
+    started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ,
+    status      TEXT NOT NULL DEFAULT 'RUNNING',   -- RUNNING/SUCCEEDED/FAILED
+    rows        BIGINT NOT NULL DEFAULT 0,
+    checkpoint  JSONB,
+    error       TEXT
+);
+
+-- 制品（报告、曲线、交易明细）。只存 storage_key，绝不存绝对路径（§3.11）
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id  TEXT PRIMARY KEY,
+    run_id       TEXT REFERENCES backtest_runs(run_id),
+    kind         TEXT NOT NULL,                    -- report_json / trades_csv / equity_csv
+    storage_key  TEXT NOT NULL,
+    bytes        BIGINT NOT NULL DEFAULT 0,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 心跳（§2.5.7）。写库不写日志：容器挂了日志也就没了
+CREATE TABLE IF NOT EXISTS heartbeats (
+    component TEXT PRIMARY KEY,
+    beat_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 迟到事件（§2.5.3）：available_at 已过但被更晚的事件挤到后面
+CREATE TABLE IF NOT EXISTS late_events (
+    seq        BIGINT PRIMARY KEY,
+    event_id   UUID NOT NULL,
+    topic      TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 告警抑制（§2.5.7）：同 alert_key 30 分钟内只发一次
+CREATE TABLE IF NOT EXISTS alert_log (
+    alert_key   TEXT NOT NULL,
+    sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    severity    TEXT NOT NULL,
+    PRIMARY KEY (alert_key, sent_at)
+);

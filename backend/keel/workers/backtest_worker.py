@@ -11,28 +11,34 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
+from keel.config import get_settings
 from keel.logging import configure_logging, get_logger
 from keel.ops import heartbeat
-from keel.research import backtest
+from keel.research import backtest, runner
 
 log = get_logger(__name__)
 
 
 def main() -> None:
     configure_logging("backtest-worker")
-    log.info("backtest worker started")
+    settings = get_settings()
+    raw_root = Path(settings.raw_root)
+    log.info("backtest worker started", extra={"raw_root": str(raw_root)})
+    backtest.sweep_orphans(timeout_seconds=settings.backtest_timeout_seconds)
     while True:
         try:
             heartbeat.beat("backtest-worker")
-            run = backtest.claim_next()
+            run = backtest.claim_next(timeout_seconds=settings.backtest_timeout_seconds)
             if run is None:
                 time.sleep(2)
                 continue
             log.info("claimed run", extra={"run_id": run.run_id})
-        except NotImplementedError:
-            log.warning("backtest execution not implemented yet; idling")
-            time.sleep(60)
+            result = runner.execute_run(run, raw_root=raw_root)
+            runner.persist_report(run, result)
+            backtest.finish(run.run_id, metrics=result["metrics"])
+            log.info("run finished", extra={"run_id": run.run_id})
         except Exception:
             log.exception("backtest failed")
             time.sleep(5)

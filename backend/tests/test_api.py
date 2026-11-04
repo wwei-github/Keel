@@ -27,15 +27,9 @@ def test_health_returns_envelope(client: TestClient) -> None:
 
 
 def test_unimplemented_endpoints_use_unified_error_shape(client: TestClient) -> None:
-    r = client.get(
-        "/api/v1/bars",
-        params={
-            "symbol": "BTC/USDT",
-            "interval": "1h",
-            "start": "2025-01-01",
-            "end": "2025-02-01",
-        },
-    )
+    # /bars 与 /reports 都已实现（Task 16/17），501 断言换到 V1 范围外的
+    # 总开关接口——执行网关在 V1 不启用，API-09/15 保持占位是有意的。
+    r = client.get("/api/v1/ops/kill-switch")
     assert r.status_code == 501
     err = r.json()["error"]
     assert err["code"] == "NOT_IMPLEMENTED"
