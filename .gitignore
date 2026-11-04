@@ -1,16 +1,31 @@
-# 虚拟环境与缓存
-.venv/
-.uv-cache/
+# Python
 __pycache__/
 *.py[cod]
+.venv/
+.uv-cache/
 .pytest_cache/
 .hypothesis/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+*.local
+
+# 数据与制品（本地生成，不进仓库）
+# 必须锚定到仓库根：不锚定的 `data/` 会把 backend/keel/data/ 也吞掉，
+# 而那是源码包。
+/data/
+*.duckdb
+*.parquet
+
+# 密钥
+.env
+secrets/
+*.pem
+*.key
 
 # macOS
 .DS_Store
-
-# 本地数据与密钥（永不入库）
-data/
-secrets/
-*.env
-.env

@@ -1,0 +1,100 @@
+# 单机部署。六个服务，各有明确职责边界（§2.5.1、§9）。
+#
+# 两个容易踩的坑已经在这里处理掉：
+# 1. 所有容器的 TZ 固定 UTC——宿主机是 Asia/Shanghai，不固定就会出现
+#    日志里 01:15 的任务在 09:15 跑。
+# 2. 数据卷用 named volume 而不是 macOS 下的 bind mount：
+#    Docker Desktop 在 macOS 上跨文件系统映射极慢，DuckDB 写入会慢一个数量级。
+
+x-common: &common
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile.backend
+  env_file: ../.env
+  environment:
+    TZ: UTC
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: keel
+      POSTGRES_PASSWORD: keel
+      POSTGRES_DB: keel
+      TZ: UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keel -d keel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    <<: *common
+    command: ["uvicorn", "keel.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - duckdb:/app/data/duckdb
+      - raw:/app/data/raw
+      - artifacts:/app/data/artifacts
+
+  # 只写 DuckDB 的那个进程。ETL 单写者约束靠"只有一个实例"来保证，
+  # 所以这里绝不允许 scale > 1。
+  etl-worker:
+    <<: *common
+    command: ["python", "-m", "keel.workers.etl_worker"]
+    volumes:
+      - duckdb:/app/data/duckdb
+      - raw:/app/data/raw
+      - artifacts:/app/data/artifacts
+
+  # 回测执行器：API 只入队，它用 FOR UPDATE SKIP LOCKED 认领（¶2.5.6）
+  backtest-worker:
+    <<: *common
+    command: ["python", "-m", "keel.workers.backtest_worker"]
+    environment:
+      TZ: UTC
+      KEEL_BACKTEST_CONCURRENCY: "1"
+      KEEL_BACKTEST_TIMEOUT_SECONDS: "1800"
+    mem_limit: 8g
+    volumes:
+      - duckdb:/app/data/duckdb
+      - raw:/app/data/raw
+      - artifacts:/app/data/artifacts
+
+  scheduler:
+    <<: *common
+    command: ["python", "-m", "keel.workers.scheduler_worker"]
+    volumes:
+      - duckdb:/app/data/duckdb
+      - raw:/app/data/raw
+      - artifacts:/app/data/artifacts
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  duckdb:
+  raw:
+  artifacts:

@@ -1,0 +1,80 @@
+[project]
+name = "keel"
+version = "0.1.0"
+description = "Keel（龙骨）个人加密量化平台"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    # 数据处理
+    "pandas>=2.2,<3",
+    "numpy>=1.26,<3",
+    "pyarrow>=17,<20",
+    # Web 层
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "pydantic>=2.9,<3",
+    # 存储
+    "psycopg[binary,pool]>=3.2,<4",
+    "duckdb>=1.1,<2",
+    # 交易与回测（V2 才真正用到，先锁定版本范围）
+    "ccxt>=4.4,<5",
+    "apscheduler>=3.10,<4",
+    # 报告
+    "quantstats>=0.0.62",
+]
+
+# 这些是 V2/V3 才装的，V1 的纯数据与研究路径不需要它们。
+# 拆成 extra 而不是默认依赖，是为了让 V1 的 CI 不被 Freqtrade 的依赖树拖住。
+[project.optional-dependencies]
+trading = [
+    "freqtrade>=2024.9",
+    "cryptofeed>=2.4,<3",
+]
+
+# 开发依赖用 dependency-groups（PEP 735）而不是 extra：
+# `uv sync` 会默认安装它，`uv sync --no-dev` 会跳过它。
+# 写成 extra 的话，忘了加 --extra dev 就会得到一个没有 pytest 的环境。
+[dependency-groups]
+dev = [
+    "pytest>=8.2,<9",
+    "hypothesis>=6.100,<7",
+    "ruff>=0.7,<1",
+    "mypy>=1.13,<2",
+    "pandas-stubs>=2.2",
+    "httpx2>=0.1",
+]
+
+[project.scripts]
+keel-api = "keel.api.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["keel"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    # 骨架阶段大量 `raise NotImplementedError` 的占位函数没有用到全部参数
+    "ARG001",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = true
+
+[tool.uv]
+# 依赖锁定策略（Q7）：uv.lock 全量 hash 锁，CI 与本地一律 `uv sync --frozen`。
+# 升级必须显式 `uv lock --upgrade-package <name>` 并提交 lock 变更，
+# 不允许在测试通过的前提下静默升版本——否则 A4 的可复现性随升级漂移。
+package = true

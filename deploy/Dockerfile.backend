@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+# duckdb 的 wheel 自带二进制，不需要编译工具链；但 pyarrow 在某些平台上要 gcc。
+# 装完就卸，避免镜像里留下 300MB 的编译器。
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1 \
+    TZ=UTC
+
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY backend/keel ./keel
+RUN uv sync --frozen --no-dev
+
+ENV PATH="/app/.venv/bin:$PATH"
+CMD ["python", "-c", "print('set a command in docker-compose.yml')"]
