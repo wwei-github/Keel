@@ -24,6 +24,7 @@ from keel.data.features import compute_batch
 from keel.data.lake import read_bars
 from keel.db.mart import publish as mart_publish
 from keel.db.mart import writer_lock as mart_writer_lock
+from keel.features import FEATURE_VERSION
 
 ALL = ("dwd_bars", "dws_features", "ops_coverage")
 
@@ -35,6 +36,34 @@ class EtlResult:
     started_at: datetime
     finished_at: datetime
     mart_version: str
+
+
+def _build_features(dwd: pd.DataFrame) -> pd.DataFrame:
+    """由 ``dwd_bars`` 算特征表。
+
+    必须**按 (symbol, interval) 分组**再算。原先整表一次性算，两个后果：
+    ``open_time`` 作为唯一索引会撞车（两个标的同一时刻各一行，索引重复，
+    写进 DuckDB 后无法区分谁是谁），而且滚动窗口会跨标的续算——BTC 的最后
+    20 根会参与 ETH 的 SMA，算出来的特征两样都不对。
+
+    特征列由 ``keel.features.compute`` 决定，这里不写死列名：换特征版本时
+    只改那一处。
+    """
+    if dwd.empty:
+        return pd.DataFrame(columns=["open_time", "symbol", "interval", "feature_version"])
+
+    parts: list[pd.DataFrame] = []
+    for (symbol, interval), chunk in dwd.groupby(["symbol", "interval"], sort=True):
+        # 只取已收盘的 bar 参与计算；is_outlier 的 bar 仍然保留——它是数据质量
+        # 记录，不是"这条数据不存在"，丢掉会让覆盖率与回测都少一行。
+        ordered = chunk.sort_values("open_time")
+        frame = compute_batch(ordered.set_index("open_time"))
+        frame = frame.reset_index()
+        frame["symbol"] = symbol
+        frame["interval"] = interval
+        frame["feature_version"] = FEATURE_VERSION
+        parts.append(frame)
+    return pd.concat(parts, ignore_index=True)
 
 
 def run_once(
@@ -68,11 +97,7 @@ def run_once(
             counts["dwd_bars"] = len(dwd)
 
             if "dws_features" in wanted:
-                feats = (
-                    compute_batch(dwd.set_index("open_time")) if not dwd.empty else (pd.DataFrame())
-                )
-                if not dwd.empty:
-                    feats = feats.reset_index()
+                feats = _build_features(dwd)
                 con.register("feat_df", feats)
                 con.execute("create table dws_features as select * from feat_df")
                 counts["dws_features"] = len(feats)

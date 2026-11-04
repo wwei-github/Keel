@@ -20,6 +20,9 @@ class Job:
 
 
 JOBS: tuple[Job, ...] = (
+    # 必须排在 daily-backfill 之前：回补要读 instruments 表里哪些标的在交易。
+    # 顺序颠倒不报错，只是那天一根 K 线都没补，日志只说「没有启用标的」。
+    Job("sync-instruments", "0 0 * * *", "同步交易对主数据与上下架状态（UTC 00:00）"),
     Job("sync-closed-bars", "5 * * * *", "增量同步已收盘 K 线；错开整点，避开行情写入高峰"),
     Job("daily-backfill", "30 0 * * *", "回补日线缺口与交易对状态变更（UTC 00:30）"),
     # build-marts 与 coverage-check 分开跑：ETL 失败时覆盖率仍要说得出话，

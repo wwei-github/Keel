@@ -5,7 +5,7 @@
 > 系统阶段：全新系统（Greenfield），无既有代码与既有数据
 > 使用者：本人（开发、研究、交易与运维均由一人承担）
 > 上游输入：口头需求（九组件链路），无 PRD
-> 版本：2026-11-05 / v0.8
+> 版本：2026-11-05 / v0.9
 > 当前交付目标：V1 研究回测版（历史数据、回测、报告与查看），交易执行从 V2 开始
 
 ---
@@ -182,6 +182,7 @@ flowchart TB
   end
 
   SCH["APScheduler<br/>批处理调度"]
+  MIG["migrate<br/>一次性建表"]
 
   EXA --> COL
   EXA --> BF
@@ -210,6 +211,9 @@ flowchart TB
   API --> WEB
   SCH --> BF
   SCH --> ETL
+  MIG -.->|建表完成后才启动| BT
+  MIG -.-> ETL
+  MIG -.-> API
   SCH --> SKF
   SCH --> QS
 ```
@@ -1277,6 +1281,7 @@ flowchart LR
     ETL["etl-worker"]
     BT["backtest-worker"]
     SCH["scheduler"]
+    MIG["migrate（一次性）"]
     SR["strategy-runtime (V2)"]
     GW["execution-gateway (V2)"]
     API["api"]
@@ -1295,6 +1300,9 @@ flowchart LR
   BT --> VOL
   SCH --> BF
   SCH --> ETL
+  MIG -.->|建表完成后才启动| BT
+  MIG -.-> ETL
+  MIG -.-> API
   API --> PG
   API --> VOL
   BT --> PG
@@ -1312,6 +1320,8 @@ flowchart LR
 V1 部署回填器、ETL、调度器、`backtest-worker`、服务 API、Web，以及 PostgreSQL、DuckDB 与制品卷。采集器、策略运行时、执行网关在 V2 引入，V1 的部署清单中不启动这三个容器。上一版漏了 `backtest-worker`，导致「回测谁执行」在文档里没有落点（§2.5.6）。
 
 - 进程按职责拆分，采集、回填、ETL、回测、调度、策略、网关、API、Web 各自独立容器。进程边界同时是故障隔离边界与许可边界。
+- **建表必须有独立的一次性服务并挡在所有 worker 之前**（v0.9 踩过）：`migrate` 服务跑完（`service_completed_successfully`）才允许 api / etl-worker / backtest-worker / scheduler 启动。少了这一步，worker 起来第一句就是 `psycopg.errors.UndefinedTable: relation "backtest_runs" does not exist`，然后按 `restart: unless-stopped` 无限重启——现场看起来是崩溃循环，实际是库里没有表。
+- **端口冲突要先看谁占着**：`5432` 常被别的项目的 Postgres 占掉，`docker compose up` 会报 `Bind for 0.0.0.0:5432 failed: port is already allocated`。用 override 文件改映射端口，而不是停别人的容器；`ports: !override` 是必须的写法——只写 `ports` 会与基础文件合并而不是替换。
 - `postgres` 使用独立数据卷；`data` 卷存放 Parquet、DuckDB 与制品，挂载到采集、回填、ETL、回测 worker、API 容器。交易面不挂载研究卷的写权限，只挂载自己的 `state` 卷。
 - **macOS 上的 I/O 注意**：Docker Desktop 的 bind mount 对 DuckDB/Parquet 的随机 I/O 很慢（跨 VM 文件共享），生产数据一律用 named volume 或本地 Linux 主机；不要把 `data` 卷映射到宿主 `~/Documents` 下的目录再跑回测 `[Expert judgment]`。
 - **资源分配**：Docker Desktop 默认内存偏小，VectorBT 与 Freqtrade 回测容易 OOM。建议给 VM 至少 8 GB，`backtest-worker` 容器上限 8 GB，`etl-worker` 4 GB，`duckdb` 查询 `SET memory_limit='2GB'; SET temp_directory='/tmp/duckdb';`。
@@ -1409,6 +1419,7 @@ V1 只保留历史数据、研究、报告与查看四条路径。图中没有�
 
 | 任务 | 触发 | 作用 |
 |---|---|---|
+| `sync-instruments` | 每日 00:00 UTC | 同步交易对主数据与上下架状态；**必须排在所有回补任务之前** |
 | `sync-closed-bars` | 每小时第 5 分钟（UTC） | 增量同步已收盘 K 线 |
 | `daily-backfill` | 每日 00:30 UTC（北京 08:30） | 回补日线缺口与交易对状态变更 |
 | `build-marts` | 每日 00:45 UTC | 重建受影响分区与特征 |
@@ -1421,7 +1432,11 @@ V1 只保留历史数据、研究、报告与查看四条路径。图中没有�
 
 上一版的「每日 08:30（UTC 00:30）」把本地时间与 UTC 混写，且没有说明 APScheduler 的时区设置。这里统一按 UTC 表达，括号内是北京时间的展示值；调度器 `timezone='UTC'`，容器 `TZ=UTC`，两者必须一致，否则 cron 会偏移 8 小时。
 
-任务以 `(dataset, symbol, date)` 或业务日期作为 `job_key`，重复触发返回已有执行记录。V1 没有交易时段，但回填限流预算要为 V2 留出余量 `[Expert judgment]`。
+任务以 `(dataset, symbol, date)` 或业务日期作为 `job_key`，重复触发返回已有执行记录。
+
+**排序约束（v0.9 补）**：`sync-instruments` 必须早于任何回补任务。回补器从 `instruments` 表读「哪些标的在交易」，表为空时它**不报错**，只写一行 `no enabled instruments` 然后退出——表现为「今天没有缺口」，实际是一根 K 线都没补。v0.8 之前没有任何代码往这张表写数据，所以 `make backfill` 与两个回补定时任务全部空转，而日志看起来一切正常。
+
+V1 没有交易时段，但回填限流预算要为 V2 留出余量 `[Expert judgment]`。
 
 **V1 验收标准**
 
@@ -1437,6 +1452,28 @@ V1 只保留历史数据、研究、报告与查看四条路径。图中没有�
 | A8 | 报告标注 | 所有报告标注「模拟回测」，不出现实盘业绩措辞；报告元数据含 `run_id`、`data_snapshot_id`、代码版本 |
 | A9 | 策略契约冻结 | `decide(window, bar, params, position, state) -> list[Signal]` 签名、`lookback`、`required_lookback`、参数 schema、特征入口、`cost_models`、输出登记**七项**在 V1 结束时冻结并写入手册；**判定以 `keel/contracts.py` 通过 `tests/test_contract.py` 为准**（当前 40 passed），不以文档里写了签名为准；属性测试覆盖双均线与唐奇安突破两个玩具策略，并做过变异测试确认断言有效（§3.7） |
 | A10 | 恢复可用 | 从零环境按备份恢复（PG + 原始湖），重建集市后可复跑一个样本回测并通过 A4；记录实际 RTO |
+
+**验收项的可执行性（v0.9 核对）**
+
+A1–A10 写在文档里时看不出问题，跑起来才发现「谁都能写一条检查，但没人保证它真的会执行」。
+v0.9 逐个核对后，现状是：
+
+| 项 | 是否有实现 | 说明 |
+|---|---|---|
+| A1 | `check_a1` | 已接入 `make acceptance`，失败会返回非零退出码 |
+| A2 | `check_a2_live` | v0.9 新写。v0.8 的 `check_a2` 需要调用方传 job，`main()` 里没人传 → 永不执行 |
+| A3 | `check_a3` | **v0.9 新写**。v0.8 文档写了判定口径但代码里没有这个函数 |
+| A4 | `check_a4` | 需要 `run_factory`，`main()` 里没接 → 目前仍需在代码里显式调用 |
+| A5 | 无 | V1 不要求归因，只要求记录差异；由回测制品里的 `per_symbol` 承担 |
+| A6 | 无 | 时延要在有 2000 点数据的环境上量，本地样本只有几百行，量了也不代表什么 |
+| A7 | `check_a7` | 已接入。v0.9 修掉它把自己扫成违规的 bug（正则写在源码里，`grep` 必然命中） |
+| A8 | 间接 | 由 `persist_report` 写入的 `disclaimer` 字段保证，无独立检查 |
+| A9 | `tests/test_contract.py` | 40 个测试，已达成 |
+| A10 | 无 | 恢复演练要真删一次库，本地没做过 |
+
+结论：**能自动判定的是 A1/A2/A3/A7/A9，A4 需要人工接线，A5/A6/A8/A10 目前靠人。**
+这张表本身的意义大于它的内容：它区分了「已验证」与「写了但没跑过」——
+后者比没有更危险，因为它会让人以为验过了。
 
 **关于 A3 的两次收窄（三处 → 两处 → 具体到 keel-bar）**：初版要求 `dws_features`、VectorBT、Freqtrade 三处逐值一致。第一次收窄的理由是 VectorBT 向量化的成本模型与事件驱动路径本就不同（按 bar 收盘价一次性成交、不模拟逐笔滑点），要求「指标值逐值一致」在语义上不成立——一致的应该只是**特征值**，不是回测指标。第二次收窄发生在这个计划实际落地时（v0.8）：Freqtrade 的 `IStrategy.populate_*` 接口与 `decide()` 契约不同，适配是一整块独立工作，V1 改用自建执行器 `keel-bar`（ADR-009）；它逐 bar 调 `keel.contracts.run_decide`，决策时现算特征。于是 A3 守的东西没变——仍是「批量算的特征」与「决策时现算的特征」不漂移——只是第二条路径从 Freqtrade 换成了 `keel-bar`。这不是降低标准，而是把「本版真正会跑的那条路径」写进验收。
 
@@ -1600,7 +1637,7 @@ flowchart TB
 ```
 backend/                    Python 服务
   keel/                     主包（68 个模块，约 4000 行）
-  tests/                    137 个测试（契约 40 + 领域与 API 97）
+  tests/                    154 个测试（契约 40 + 领域、API 与验收 114）
   pyproject.toml, uv.lock
 web/                        Vite + React + TypeScript
   src/api/                  HTTP 客户端（Envelope 解包、错误规格化）
@@ -1633,7 +1670,7 @@ docs/                       本文档
 | §5.2/§5.3 表结构 | `backend/keel/db/{schema.sql,pool.py,mart.py,migrations.py}` | **已实现**：11 张表 + 幂等追加列、连接池、DuckDB 单写者原子发布 |
 | §6 接口 | `backend/keel/api/` | **V1 接口全部实现**（API-01/02/03/04/05/10/11/12）；API-09/15 刻意留 `501`（V2） |
 | §2.5.7 告警与心跳 | `backend/keel/ops/{alerts,heartbeat}.py` | **已实现**：Telegram 主 + 本地备、按 `alert_key` 抑制、dead-man switch |
-| §9 部署 | `deploy/` | Compose 与镜像定义完成，**镜像仍未构建过** |
+| §9 部署 | `deploy/` | Compose 与镜像定义完成；`docker compose up` 已在本机跑通（六服务 + 一次性 `migrate`），见 §13.4 |
 
 ### 13.3 骨架阶段刻意做的事
 
@@ -1648,19 +1685,27 @@ docs/                       本文档
 
 ### 13.4 已验证与仍未验证的
 
-已验证（v0.8）：
+已验证（v0.9）：
 
 - **数据库 DDL 在真实 PostgreSQL 16 上执行过**，`migrate()` 可重复执行。
 - **回填→ETL→回测→报告→API 全链路跑通**：真实 Binance `BTC/USDT` 1h，2024-01-01 至 2024-01-15 共 337 根，回测 SUCCEEDED，报告制品带 disclaimer，四个接口全部 200。
-- **测试**：带 PG 时 136 passed / 1 skipped；不带 PG 时 113 passed / 24 skipped（跳过的是必须真库的队列、事件与集成测试）。
+- **测试**：带 PG 时 153 passed / 1 skipped；不带 PG 时 125 passed / 29 skipped（跳过的是必须真库的队列、事件与集成测试）。
 - **前端接真实数据**：`tsc --noEmit` 与 `npm run build` 通过，四个页面经 Vite 代理取到真实响应。
+- **两个镜像构建成功并跑起来过**：`DOCKER_BUILDKIT=0 docker build` 分别产出 `keel-backend:test` 与 `keel-web:test`；`docker run --rm keel-backend:test python -c "import keel, fastapi, duckdb, psycopg"` 打印 `keel 0.1.0`，`keel-web:test` 里 `/usr/share/nginx/html` 有 `index.html` 与 `assets/`。注意必须加 `DOCKER_BUILDKIT=0`：buildx 会报 `failed to update builder last activity time ... operation not permitted`，那是 buildx 的 activity 目录权限问题，不是镜像定义的问题。
+- **整套 Compose 在本机跑起来了**（v0.9）：`DOCKER_BUILDKIT=0 docker compose up -d` 起六个服务，
+  容器间 DNS、named volume 挂载、`mem_limit`、`KEEL_*` 注入全部验证过。链路：
+  `sync_instruments` 写 518 个 USDT 现货对 → 一小时窗口回填 325 个标的（各 24–25 根）→ ETL 建三张集市表
+  → API 提交两标 `universe` 回测 → worker 认领执行 → `SUCCEEDED` → 报告带 disclaimer → nginx 反代
+  `/api/` 返回同样的 Envelope。
 
 仍未验证：
 
-- **Docker 镜像从未构建成功**：`docker compose config` 语法通过，但 `docker build` 没跑成（校验时 daemon 不可用）。容器内 `uv sync --frozen --no-dev` 是否成立未知。
-- **Docker Compose 未真正启动过**：容器间 DNS、卷挂载、`mem_limit`、`KEEL_*` 注入均未验证。
 - **页面没在浏览器里点过**：只验证了构建产物与接口响应，交互（图表渲染、表单提交、路由跳转）未人工确认。
-- **只有单标的、单区间真跑过**：多标的 `universe`、1m 长回填、限流长跑均未实测（见附录 B「v0.8 未做的事」）。
+- **1m 长回填未实测**：`instruments` 里有 518 个 USDT 现货对，一小时窗口的 1h 回填跑过；518 个标的 × 三年 × 1m
+  的批量回填（限流预算、内存、断点续传）没有跑过，见附录 B「v0.9 未做的事」。
+- **`docker compose down` 之后的数据持久性未验证**：named volume 里的 `pgdata`/`raw`/`duckdb` 重启后是否还在，
+  只验证了「up 起来能用」这一步。
+- **`migrate` 与 `instruments` 在容器里是手工跑的**：`migrate` 已进 compose（一次性服务），但 `sync_instruments` 与首次回填仍要 `docker compose exec` 手敲。首次部署会因此得到「服务都健康、但一根 K 线都没有」的状态。
 
 ---
 
@@ -1699,6 +1744,7 @@ docs/                       本文档
 | v0.6 | 2026-11-05 | **契约落地为代码**。新增 `keel/contracts.py`（Strategy Protocol、Signal、BarView、PositionView、CostModel、`slice_window`、`check_window_fits`、`run_decide` 输出校验）、`keel/features.py`（`sma`/`donchian`/`atr`/`roc` 原语与 `compute` 固定特征集）、`keel/strategies.py`（双均线交叉、唐奇安突破）、`tests/test_contract.py`（40 个测试，含 hypothesis 属性测试）、`pyproject.toml` + `uv.lock`（Q7）。**契约由六项扩为七项**：新增修订 ⑥ `required_lookback(params)`（堵住「参数超出窗口导致静默无信号」）、修订 ⑦ `decide` 增加 `bar: BarView`（窗口与决策点分离，突破策略才拿得到当前收盘价）。§3.7 补「变异测试」小节，记录三次注入破坏各失败多少测试。A9 判定更新为七项并标注已完成；Q7、Q8 移入「已关闭的阻塞项」；新增 ADR-006（契约从文档评审改为代码验证）、ADR-007（`lookback` 与 `required_lookback` 的分工） |
 | v0.7 | 2026-11-05 | **工程骨架落地**（新增 §13）。仓库改为单仓双目录（`backend/` + `web/`），新增 `backend/keel` 下 15 个子包骨架（api/data/market/research/execution/risk/runtime/portfolio/reports/scheduler/events/db/ops/workers）、`web`（Vite + React + TS + lightweight-charts）、`deploy`（docker-compose + Dockerfile + nginx）、`.github/workflows/ci.yml`、`Makefile`、`README.md` 重写。新增 `keel/config.py`（frozen Settings）、`errors.py`（`ErrorCode` 稳定枚举）、`logging.py`（JSON 行日志）、`api/`（Envelope + `meta.stale` + 统一错误处理 + 五个 router）、`db/schema.sql`（八张表 DDL）、`workers/`（三个常驻进程入口）。开发依赖改用 PEP 735 `dependency-groups`。全文新增 §13 记录「文档章节 → 代码包」映射与骨架阶段刻意做的六件事、未验证的四件事 |
 | v0.8 | 2026-11-05 | **V1（研究回测）实现完成**。21 个任务的实施计划落盘于 `docs/superpowers/plans/2026-11-04-v1-research-backtest.md`。新增实现：`db/pool.py`（`ConnectionPool` + `dict_row`）、`db/mart.py`（flock 单写者 + 临时文件原子发布）、`data/{schemas,lake,coverage,dwd,etl}.py`、`market/{normalize,exchange,backfill}.py`、`research/{registry,simulator,metrics,runner,backtest,engine}.py`、`reports/{quantstats,artifacts}.py`、`events/bus.py`（PG 表 + `LISTEN/NOTIFY`）、`ops/{alerts,heartbeat}.py`、`scheduler/jobs.py`、`workers/{etl,backtest,scheduler}_worker.py`、`tools/{acceptance,backfill,exchange_factory}.py`、`api/{downsample,routers/*}.py`。**范围与口径修订**：`ops_coverage` 改为 ETL 派生表（ADR-008）；V1 执行器改为自建 `keel-bar`，Freqtrade 适配推 V1.5（ADR-009）；A3 随之收窄为「`dws_features` 与 `keel-bar` 决策时现算的特征逐值一致」。**验收**：137 个测试（带 PG 136 passed / 1 skipped，无 PG 时 113 passed / 24 skipped）。**真实数据端到端跑通**：Binance 回填 337 行 → ETL 建三张集市表 → 回测 SUCCEEDED → 报告制品带 disclaimer → API 四项 200 → Web 四页接真数据。附录 B 新增「v0.8 未做的事」 |
+| v0.9 | 2026-11-05 | **V1 收口与三处修补**。新增 `market/instruments.py`（`sync_instruments` / `from_markets` / `_decimals`）与调度任务 `sync-instruments`（ADR-010）——v0.8 之前 `instruments` 表没有任何写入路径，所有回补任务静默空转。修 ETL 特征混算（整表一次算导致 `open_time` 索引撞车、滚动窗口跨标的续算）改为按 `(symbol, interval)` 分组，`dws_features` 从 674 行/337 个 distinct `open_time` 变为两标的分组结果。验收脚本补 `check_a3`（`A3_REL_TOL = 1e-9`）与 `check_a2_live`，重写 `check_a7`（原 `grep` 会命中自己，永远失败），`main()` 现跑 A1/A2/A3/A7。`Makefile` 加 `migrate`/`instruments` 并让 `backfill` 依赖 `instruments`；`.env.example` 补 `KEEL_EXCHANGE_MARKET_TYPE`。**测试 154 个**（带 PG 153 passed / 1 skipped，无 PG 125 passed / 29 skipped）。文档修正 v0.8「多标的未验证」的错误表述（`runner.py` 本就是逐标的等权组合）、新增「验收项的可执行性」表（A1/A2/A3/A7/A9 可自动判定，A4 需人工接线，A5/A6/A8/A10 靠人）、新增 ADR-010。**整体 Compose 首次跑通**：新增一次性 `migrate` 服务并挡在所有 worker 之前（`service_completed_successfully`），此前 worker 会以 `UndefinedTable: relation "backtest_runs" does not exist` 无限重启；`Makefile` 加 `env`/`BUILDKIT` 变量。实测：518 个 USDT 现货对写入、325 个标的各回填 24–25 根、两标回测 SUCCEEDED、nginx 反代 `/api/` 返回同样 Envelope。 |
 
 ### v0.4 未做的事 → v0.5 的处理
 
@@ -1725,7 +1771,7 @@ docs/                       本文档
 
 ### v0.7 未做的事
 
-- **镜像从未构建成功过**：`docker compose config` 能通过（配置语法正确），但 `docker build` 没跑成——校验时本机 Docker daemon 未运行。`uv sync --frozen --no-dev` 在容器内是否成立、`hatchling` 打包是否带上全部子包，都还是未知。
+- ~~**镜像从未构建成功过**~~ **（v0.9 已解决）**：`DOCKER_BUILDKIT=0 docker build` 两个镜像都构建成功并 `docker run` 冒烟通过。原先的失败原因也不是 daemon 未运行，而是 buildx 的 activity 目录权限。`docker compose config` 一直能通过（配置语法正确）。`uv sync --frozen --no-dev` 在容器内是否成立、`hatchling` 打包是否带上全部子包，都还是未知。
 - **Docker Compose 从未启动过**：容器间 DNS（`api` 主机名）、四种卷的挂载、`backtest-worker` 的 `mem_limit` 与 `KEEL_BACKTEST_*` 注入都未验证。
 - **`schema.sql` 没在真实 PostgreSQL 上执行过**：DDL 手写，字段类型、外键顺序、索引是否成立都未验证（建表顺序本身是按依赖排过的）。
 - **前端只接过 `/health`**：K 线图、行情页、回测页的渲染路径从未被真实数据走过。`lightweight-charts` 的 `setData` 在空数组、单点、乱序数据下的行为未测。
@@ -1737,11 +1783,21 @@ docs/                       本文档
 - **`ops_coverage` 只有一份派生结果，没有历史**：它每次 ETL 重算并随集市一起原子发布，因此「昨天的覆盖率是多少」查不到。要追溯得看 `audit_log` 与原始湖分区本身（信息都在，只是没有便利查询）。
 - **回填只用 1h/4h/1d 真跑过 337 行**：1m 的 7900 万行路线从未在真实限流下跑过。按文档估算约 2.2 小时，但 Binance 的权重限流在长跑下的表现（是否会触发 418/429 冷却）未实测。
 - **告警只验证了抑制逻辑，没验证送达**：`send()` 的 Telegram 分支需要真实 bot token 才会发出去；测试里走的是 `_suppress` 与本地通知分支。dead-man switch 的心跳缺失告警同理，代码路径通了但端到端未验证。
-- **多标的仍未验证**：所有端到端验证都只有 `BTC/USDT` 一个标的。`universe` 是列表、回测按单标的算——多标的语义要等 V3 的组合分配才有意义，但「传两个标的会怎样」目前是未定义行为（会默默只用第一个）。
+- ~~**多标的仍未验证**~~ **（v0.9 更正）**：这条 v0.8 写错了。`runner.py` 是 `for symbol in run.universe:` 逐标的模拟后按 `equity / equity.iloc[0]` 等权平均，多标的组合是实现了的；实测 `universe=['BTC/USDT','ETH/USDT']` 回测 SUCCEEDED。真实缺陷小得多：`backtest_runs.symbol` 这一列只记 `universe[0]`，多标的时该列有误导性。
 - **鉴权未启用**：`require_token` 在未配 `KEEL_API_TOKEN` 时放行（开发模式）。部署到非本机地址前必须先配上，这条写在这里是因为它默认是关的。
 - **`ads_backtest_runs` 数据集未建**：文档 §5.4 列了它，代码里回测结果直接进 PG `backtest_runs` + 制品文件。是否还需要一份 DuckDB 的副本用于跨运行分析，等有多次回测后再定。
 - **没有迁移框架**：`schema.sql` 是幂等 DDL（`create table if not exists` + `add column if not exists`），只能往前走不能回滚。字段改名或删除需要手写迁移，而现在一套都没有。
 
+
+### v0.9 未做的事
+
+- **A4/A5/A6/A8/A10 仍靠人**：`check_a4` 需要调用方传 `run_factory`，`main()` 里没接；A6 的时延要在有 2000 点数据的环境上量；A8 只由 `persist_report` 的 `disclaimer` 字段间接保证；A10 的恢复演练要真删一次库。逐项状态见 §11.1 的「验收项的可执行性」表。
+- **1m 长回填仍未实测**：`sync_instruments` 现在会写入 518 个 USDT 现货对，`run_for_enabled_instruments` 默认 `interval="1h"`、`lookback_days=2`，一次性对 518 个标的拉 1m 三年会在几分钟内打满权重限流。要真跑得先加并发上限与断点续传，这两样都没做。
+- **518 个标的只验证过 2 个**：主数据同步写了 518 行，但原始湖里只有 `BTC/USDT` 与 `ETH/USDT` 各 337 行。批量回填的正确性（限流、分区、内存）在大规模下未验证。
+- **`sync_instruments` 的失败告警没端到端验证**：`test_sync_instruments_failure_alerts` 断言的是「抛异常前调用了 `alerts.send`」，不是「Telegram 真的收到」。真实送达仍缺 token。
+- **告警没有分级路由**：`send` 接受 `Severity`，但 `P0/P1/P2` 走同一个 Telegram 会话、同一个抑制窗口。真实使用时会希望 P0 能@人、P2 只在每日汇总里出现。
+- **`instruments` 没有软删除之外的审计**：`HALT` 保留了行，但「这个标的是什么时候从 TRADING 变 HALT 的」只能看 `updated_at`，没有逐次变更记录。
+- **文档与代码的测试数字仍需手工同步**：`README.md`、本文档 §13、附录 B 三处都写测试数量，改一次测试要改三处。没有自动检查（比如从 CI 读实际数字回写）。
 
 ---
 
@@ -1829,3 +1885,12 @@ docs/                       本文档
 **理由**：Freqtrade 的策略接口是 `IStrategy.populate_*`（一整套批量算指标 + 生成信号的钩子），与我们的 `decide()` 契约是两种心智模型。适配它要写一层把 DataFrame 喂给 populate、再把 `enter_long` 列翻译成 `Signal` 的胶水，还要处理它自带的风控与仓位模型——这是一整块独立工作，塞进 V1 会推迟数据链路。而 A3 真正要防的风险是「批量算的特征」与「决策时现算的特征」漂移，`keel-bar` 逐 bar 调同一个 `keel.features.compute`，这个风险它直接覆盖。
 
 **影响**：V1 的回测结果**不能**和 Freqtrade 对拍，A3 的第二条路径换成 `keel-bar`（见 §11.1 的说明段）。这削弱了「与成熟引擎对齐」这个信心来源，换成「与自己的实盘路径对齐」——考虑到 V2 实盘也走 `decide()`，后者对 V2 更有价值。代价是回测结果的绝对可信度上限降低：一个自己写的执行器，成交假设错了没人能替我们发现。缓解办法是 V1.5 接 Freqtrade 做对拍，这件事必须在 V2 上实盘之前完成。
+
+### ADR-010　2026-11-05　交易对主数据由独立任务同步，而不是回填器顺手写
+
+**决策**：新增 `keel/market/instruments.py` 的 `sync_instruments()`，作为调度任务 `sync-instruments`（每日 00:00 UTC）与 `make instruments` 的入口，专门负责把交易所的交易对列表 upsert 进 `instruments` 表、把消失的标的置 `HALT`。回填器只读这张表，不写。
+
+**理由**：v0.8 之前这张表没有任何写入路径，而回填器从它读「哪些标的在交易」——于是 `make backfill` 与两个回补定时任务全部空转，日志只有一行 `no enabled instruments; nothing to backfill`。**这不是一个 bug，是一处缺失被另一处健壮性掩盖了**：回填器对空清单的处理是「记 info 然后正常返回」，这个处理本身没错（首次部署时表本来就是空的），但它让缺失永远不表现为错误。如果当初让空清单抛异常，第一次部署就会失败——那不叫更好，只是把同一个问题挪到更早。真正的修法是把缺失的那一环补上，并且让顺序约束显式化：`backfill` 在 Makefile 里依赖 `instruments`，调度表里 `sync-instruments` 排在最前。
+
+**影响**：主数据现在有一个每小时/每日的同步点，交易所上下架会在一个周期内反映到回填范围。`HALT` 而不是删除，是为了让历史行仍能解释（删掉的话，昨天的回填记录会指向一个不存在的标的）。代价是多一个网络调用点，且它的失败会让当天回填全部空转——所以它自己的失败必须告警，不能沿用「记 info 就返回」。
+

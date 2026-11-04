@@ -71,3 +71,28 @@ def test_jobs_cover_documented_schedule() -> None:
         "archive-and-compress",
     } <= ids
     assert all("TZ" not in j.cron for j in JOBS)  # cron 表达式本身不带时区，注册时统一 UTC
+
+
+def test_sync_instruments_failure_alerts(monkeypatch) -> None:
+    """主数据同步失败必须走告警，不能只记日志。
+
+    v0.8 的教训：这张表没人写的时候，回填器读到空清单是「记 info 然后正常返回」，
+    下游表现是「今天没缺口」，比真实情况好看得多（ADR-010）。
+    """
+    from keel.market import instruments as instruments_mod
+    from keel.workers import scheduler_worker
+
+    sent: list[tuple] = []
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("binance down")
+
+    monkeypatch.setattr(instruments_mod, "sync_instruments", boom)
+    monkeypatch.setattr(alerts, "send", lambda *a, **kw: sent.append((a, kw)))
+
+    # dispatch 吞掉异常是既定行为（批处理任务不能把调度器带崩），
+    # 所以这里断言的不是「抛了」，而是「抛之前告警发出去了」
+    scheduler_worker.dispatch("sync-instruments")
+
+    assert sent, "同步失败没有发告警"
+    assert sent[0][0][1] == "sync-instruments"

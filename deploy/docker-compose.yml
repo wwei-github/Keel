@@ -17,6 +17,11 @@ x-common: &common
   depends_on:
     postgres:
       condition: service_healthy
+    # 建表必须先完成。没有这一步，worker 起来第一句就是
+    # UndefinedTable: relation "backtest_runs" does not exist，
+    # 然后无限重启——看起来像崩溃循环，实际是库里没有表。
+    migrate:
+      condition: service_completed_successfully
 
 services:
   postgres:
@@ -35,6 +40,23 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # 一次性任务：建表。幂等 DDL，跑多少次都一样。
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    env_file: ../.env
+    environment:
+      TZ: UTC
+    command:
+      - python
+      - -c
+      - "from keel.config import get_settings; from keel.db.migrations import migrate; migrate(get_settings().pg_dsn); print('migrated')"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   api:
     <<: *common

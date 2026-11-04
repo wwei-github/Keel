@@ -32,7 +32,23 @@ def dispatch(job_id: str) -> None:
 
     started = time.monotonic()
     try:
-        if job_id in ("sync-closed-bars", "daily-backfill"):
+        if job_id == "sync-instruments":
+            from keel.market.instruments import sync_instruments
+
+            try:
+                result = sync_instruments()
+            except Exception:
+                # 主数据同步失败必须告警，不能只记日志：它失败的下游表现是
+                # 「今天没缺口」，看起来比实际情况好得多（ADR-010）
+                alerts.send(
+                    alerts.Severity.P1,
+                    "sync-instruments",
+                    "交易对主数据同步失败",
+                    "今天的回补会空转，因为 instruments 表没有更新。",
+                )
+                raise
+            log.info("instruments synced", extra=result)
+        elif job_id in ("sync-closed-bars", "daily-backfill"):
             from keel.tools import backfill
 
             backfill.run_for_enabled_instruments()

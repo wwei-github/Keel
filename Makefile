@@ -1,6 +1,11 @@
-.PHONY: help setup test test-pg lint api web up down logs pg-up pg-down backfill etl acceptance
+.PHONY: help setup test test-pg lint api web up down logs pg-up pg-down migrate instruments backfill etl acceptance
 
 UV := UV_CACHE_DIR=$(CURDIR)/backend/.uv-cache uv
+
+# macOS 上 buildx 会报 `failed to update builder last activity time ... operation
+# not permitted`（buildx 的 activity 目录权限问题，不是 daemon 的问题）。
+# 强制走旧构建器绕开它；Linux 上可以 BUILDKIT=1 恢复默认。
+BUILDKIT ?= 0
 
 help:
 	@grep -E '^[a-zA-Z_-]+:' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":"}{printf "  %-10s\n", $$1}'
@@ -26,14 +31,26 @@ api:
 web:
 	cd web && npm run dev
 
+# compose 需要 .env（env_file 指向它）。不存在就从 example 复制一份。
+env:
+	@test -f .env || cp .env.example .env
+
 # 本地 PG 只用容器：本机不装原生 PG，省掉版本与 locale 两个变量
-pg-up:
+pg-up: env
 	docker compose -f deploy/docker-compose.yml up -d postgres
 
 pg-down:
 	docker compose -f deploy/docker-compose.yml down postgres
 
-backfill:
+# 建表。幂等，第一次跑和第一百次跑一样。
+migrate:
+	cd backend && $(UV) run python -c "from keel.config import get_settings; from keel.db.migrations import migrate; migrate(get_settings().pg_dsn); print('migrated')"
+
+# 同步交易对主数据。必须在 backfill 之前跑，否则 backfill 找不到标的、静默空转。
+instruments:
+	cd backend && $(UV) run python -c "from keel.market.instruments import sync_instruments; print(sync_instruments())"
+
+backfill: instruments
 	cd backend && $(UV) run python -c "from keel.tools.backfill import run_for_enabled_instruments as r; print(r())"
 
 etl:
@@ -43,7 +60,7 @@ acceptance:
 	cd backend && $(UV) run python -m keel.tools.acceptance
 
 up:
-	docker compose -f deploy/docker-compose.yml up --build
+	DOCKER_BUILDKIT=$(BUILDKIT) docker compose -f deploy/docker-compose.yml up -d --build
 
 down:
 	docker compose -f deploy/docker-compose.yml down
